@@ -14,16 +14,32 @@ parser.add_argument("--k_drag", type=float, default=0.02,
 parser.add_argument("--max_time", type=float, default=0.0,
                     help="If >0, stop the sim after this many seconds (for tuning).")
 parser.add_argument("--arm_mode", type=str, default="sine", choices=["hold", "sine"],
-                    help="hold: 팔 고정(기존 동작), sine: 팔 사인 스윕으로 호버 외란 테스트.")
+                    help="hold: 팔 고정(기존 동작), sine: 팔 동작으로 호버 외란 테스트.")
+parser.add_argument("--arm_profile", type=str, default="outward", choices=["outward", "center_sine"],
+                    help="outward: 시작각에서 +방향으로만 움직임(몸 안쪽으로 되돌아가는 명령 방지), "
+                         "center_sine: 기존처럼 limit 중앙 기준 사인 스윕.")
 parser.add_argument("--arm_amp", type=float, default=0.6,
-                    help="팔 관절 사인 진폭 [rad] (~34 deg).")
+                    help="팔 3,4번 관절 기본 진폭 [rad] (~34 deg).")
+parser.add_argument("--arm_j1_amp", type=float, default=0.5,
+                    help="1번 관절 진폭 [rad]. 0이면 1번 관절 고정.")
+parser.add_argument("--arm_j2_scale", type=float, default=6.0,
+                    help="2번 관절 진폭 배율. 실제 진폭은 arm_amp * arm_j2_scale로 계산 후 limit 안에서 clamp.")
 parser.add_argument("--arm_period", type=float, default=3.0,
                     help="팔 사인 주기 [s].")
 parser.add_argument("--arm_phase", type=float, default=0.0,
                     help="오른팔 위상차 [deg]. 0=동위상(CoM이 같이 흔들려 외란 최대), "
                          "180=미러(좌우 대칭이라 횡방향 CoM 상쇄).")
-parser.add_argument("--arm_start_delay", type=float, default=4.0,
-                    help="호버 안정화 후 팔 동작 시작까지 지연 [s] (T_RAMP 기준).")
+parser.add_argument("--arm_start_delay", type=float, default=0.0,
+                    help="호버 안정화 후 팔 동작 시작까지 지연 [s] (T_RAMP 기준). 기본 0이면 takeoff ramp 직후 바로 시작.")
+parser.add_argument("--arm_direction", type=float, default=-1.0, choices=[-1.0, 1.0],
+                    help="dof_[lr][2-4]를 시작각 기준 어느 방향으로 움직일지 선택. "
+                         "-1이면 [start-180deg, start], +1이면 [start, start+180deg].")
+parser.add_argument("--arm_limit_span_deg", type=float, default=180.0,
+                    help="dof_[lr][2-4]의 허용 범위: 시작 각도 기준 +이 값[deg].")
+parser.add_argument("--arm_limit_margin", type=float, default=0.03,
+                    help="팔 2~4번 사인궤적이 hard limit 안쪽에서 움직이도록 두는 마진 [rad].")
+parser.add_argument("--disable_usd_limit_patch", action="store_true",
+                    help="켜면 sim.reset() 전 USD RevoluteJoint limit 패치를 하지 않고 코드 target clamp만 사용.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -55,6 +71,12 @@ TILT_HOME = {j: 0.0 for j in (
     "dof_lb1", "dof_lb2", "dof_lf1", "dof_lf2",
     "dof_rb1", "dof_rb2", "dof_rf1", "dof_rf2",
 )}
+
+# 2, 3, 4번 매니퓰레이터 조인트는 "시작 각도 <= q <= 시작 각도 + 180 deg"로 제한한다.
+# dof_[lr]1은 기존처럼 연속/회전축 조인트로 취급한다.
+ARM_REL_LIMIT_JOINTS = tuple(
+    f"dof_{side}{idx}" for side in ("l", "r") for idx in (2, 3, 4)
+)
 
 # ----------------------------------------------------------------------------
 # 로터 위치
@@ -112,40 +134,166 @@ def vee(s):
     return torch.stack([s[..., 2, 1], s[..., 0, 2], s[..., 1, 0]], dim=-1)
 
 
+def is_relative_limited_arm_joint(joint_name):
+    """True이면 시작 각 기준 +180 deg만 허용하는 팔 조인트이다."""
+    return joint_name in ARM_REL_LIMIT_JOINTS
+
+
+def is_revolute_joint_prim(prim):
+    """USD prim이 RevoluteJoint인지 최대한 보수적으로 판정한다."""
+    return prim.IsA(UsdPhysics.RevoluteJoint) or prim.GetTypeName() == "PhysicsRevoluteJoint"
+
+
+def patch_manipulator_limits_in_usd(stage, num_envs, start_angles, span_deg, direction=1.0):
+    """PhysX가 실제 hard stop을 갖도록 sim.reset() 전에 USD revolute joint limit을 덮어쓴다.
+
+    USD Physics의 RevoluteJoint limit attribute는 degree 단위이고,
+    Isaac/PhysX tensor의 joint position은 radian 단위이다.
+    이 함수는 원본 .usd 파일을 저장하지 않고, 현재 열린 stage의 env 복제본만 수정한다.
+    """
+    total_patched = 0
+    for env_i in range(num_envs):
+        root_path = f"/World/envs/env_{env_i}/Robot"
+        root = stage.GetPrimAtPath(root_path)
+        if not root.IsValid():
+            print(f"[WARN] robot root not found while patching arm limits: {root_path}")
+            continue
+
+        for joint_name in ARM_REL_LIMIT_JOINTS:
+            start_rad = float(start_angles.get(joint_name, 0.0))
+            start_deg = math.degrees(start_rad)
+            end_deg = start_deg + float(direction) * float(span_deg)
+            lower_deg = min(start_deg, end_deg)
+            upper_deg = max(start_deg, end_deg)
+            matched = 0
+
+            for prim in Usd.PrimRange(root):
+                prim_path = str(prim.GetPath())
+                prim_name = prim.GetName()
+                if joint_name != prim_name and joint_name not in prim_name and f"/{joint_name}" not in prim_path:
+                    continue
+                if not is_revolute_joint_prim(prim):
+                    continue
+
+                joint = UsdPhysics.RevoluteJoint(prim)
+                joint.CreateLowerLimitAttr().Set(lower_deg)
+                joint.CreateUpperLimitAttr().Set(upper_deg)
+                matched += 1
+                total_patched += 1
+                print(f"[LIMIT][USD] env_{env_i} {joint_name}: "
+                      f"[{lower_deg:+.2f}, {upper_deg:+.2f}] deg -> {prim_path}")
+
+            if matched == 0:
+                print(f"[WARN] no RevoluteJoint prim matched {joint_name} under {root_path}. "
+                      "Code-level target/state clamp will still be used.")
+
+    print(f"[INFO]: patched {total_patched} USD revolute joint limit attributes "
+          f"for {len(ARM_REL_LIMIT_JOINTS)} relative-limited arm joints")
+
+
+def make_inner_limits(lo, hi, margin):
+    """finite limit만 margin만큼 안쪽으로 줄인다. 너무 좁으면 midpoint로 collapse한다."""
+    lo_i = lo.clone()
+    hi_i = hi.clone()
+    finite_lo = torch.isfinite(lo_i)
+    finite_hi = torch.isfinite(hi_i)
+    lo_i[finite_lo] += margin
+    hi_i[finite_hi] -= margin
+
+    bad = finite_lo & finite_hi & (lo_i > hi_i)
+    if bad.any():
+        mid = 0.5 * (lo[bad] + hi[bad])
+        lo_i[bad] = mid
+        hi_i[bad] = mid
+    return lo_i, hi_i
+
+
+def clamp_joint_tensor(q, lo, hi):
+    """q: (N, num_joints), lo/hi: (num_joints,)를 broadcast해서 clamp한다."""
+    return torch.maximum(torch.minimum(q, hi.unsqueeze(0)), lo.unsqueeze(0))
+
+
+def build_joint_command_limits(default_q0, usd_lims, arm_ids, arm_names, span_rad, device, direction=1.0):
+    """USD limit과 사용자 조건을 합쳐 코드가 보낼 수 있는 최종 command limit을 만든다.
+
+    dof_[lr][2-4]는 반드시 [초기각, 초기각 + span_rad]로 제한한다.
+    기존 USD limit이 더 좁은 경우에는 그 교집합을 사용한다.
+    """
+    cmd_lo = usd_lims[:, 0].clone()
+    cmd_hi = usd_lims[:, 1].clone()
+    relative_mask = torch.zeros(len(arm_ids), dtype=torch.bool, device=device)
+    constrained_ids = []
+
+    for k, (jid, name) in enumerate(zip(arm_ids, arm_names)):
+        jid = int(jid)
+        if not is_relative_limited_arm_joint(name):
+            continue
+
+        relative_mask[k] = True
+        constrained_ids.append(jid)
+        start = default_q0[jid]
+        end = start + float(direction) * span_rad
+        lo = torch.minimum(start, end)
+        hi = torch.maximum(start, end)
+
+        # USD가 이미 더 좁은 hard/soft limit을 갖고 있으면 그 안쪽으로만 명령한다.
+        if torch.isfinite(cmd_lo[jid]):
+            lo = torch.maximum(lo, cmd_lo[jid])
+        if torch.isfinite(cmd_hi[jid]):
+            hi = torch.minimum(hi, cmd_hi[jid])
+
+        if bool((hi < lo).item()):
+            print(f"[WARN] empty limit intersection for {name}; holding at start angle. "
+                  f"start={math.degrees(float(start)):+.2f} deg, "
+                  f"usd=[{math.degrees(float(usd_lims[jid, 0])):+.2f}, "
+                  f"{math.degrees(float(usd_lims[jid, 1])):+.2f}] deg")
+            hi = lo.clone()
+
+        cmd_lo[jid] = lo
+        cmd_hi[jid] = hi
+
+    constrained_ids_t = torch.tensor(constrained_ids, device=device, dtype=torch.long)
+    return cmd_lo, cmd_hi, relative_mask, constrained_ids_t
+
+
+def clamp_actual_joint_state_to_limits(robot, lo, hi, joint_ids_t, tol=1.0e-5):
+    """PhysX limit 패치가 실패한 경우에도 실제 joint state가 범위 밖으로 나가지 않게 하는 안전망."""
+    if joint_ids_t.numel() == 0:
+        return 0
+
+    q = robot.data.joint_pos.clone()
+    qd = robot.data.joint_vel.clone()
+    lo_j = lo[joint_ids_t].unsqueeze(0)
+    hi_j = hi[joint_ids_t].unsqueeze(0)
+    q_j = q[:, joint_ids_t]
+    q_j_clamped = torch.maximum(torch.minimum(q_j, hi_j), lo_j)
+    violated = (q_j < lo_j - tol) | (q_j > hi_j + tol)
+
+    if not violated.any():
+        return 0
+
+    q[:, joint_ids_t] = q_j_clamped
+    qd[:, joint_ids_t] = 0.0
+    robot.write_joint_state_to_sim(q, qd)
+    return int(violated.sum().item())
+
+
 # ----------------------------------------------------------------------------
 # Visual propeller spin (physics에 영향 없음)
 # ----------------------------------------------------------------------------
-# 프롭 링크 prim 자체의 transform은 PhysX가 매 스텝 덮어쓰므로,
-# 링크 밑 비주얼 스코프 안의 "프롭 prim"에 xformOp를 추가해 돌린다.
-# 구조: Robot/main_v10/main_v10/{duct}_link2_01/{duct}_link2_01/{duct}_prop_{up,dn}
-#       (물리 링크)        (비주얼 스코프)     (프롭 Xform, 이름으로 식별)
-#
-# - USD에서 프롭을 {duct}_prop_up / {duct}_prop_dn 으로 명시적으로 이름 붙여 둠
-#   (덕트 4개 x 동축 2개 = 총 8개). 이름이 유일하므로 이름 매칭이 곧 식별.
-# - 추가로 부모 경로에 해당 덕트의 물리 링크가 있는지 확인해서, 향후 다른
-#   서브트리에 동명 prim이 생겨도 같이 도는 것을 방지한다.
-# - 프롭 prim은 instanceable Xform이고 실제 Mesh는 프로토타입 참조(인스턴스
-#   프록시)로 그 아래에 있다. 따라서 정점은 TraverseInstanceProxies로 하위
-#   Mesh를 찾아 읽고, 프롭 prim 로컬 프레임으로 변환해 사용한다.
-# - 회전축/피벗은 메시 정점에서 직접 계산한다: 프롭은 얇은 디스크라
-#   정점 공분산의 최소 고유벡터(SVD 최소 특이방향) = 디스크 법선 = 회전축,
-#   centroid = 피벗. 메시 로컬 프레임이 CAD에서 틀어져 있어도 자동으로 맞아
-#   세차운동처럼 삐딱하게 도는 문제가 없다.
-PROP_DUCTS = ["lb", "lf", "rb", "rf"]            # f의 열 인덱스 순서
-PROP_LEAVES = ["_prop_up", "_prop_dn"]           # 덕트당 동축 프롭 2개 (USD prim 이름 suffix)
-PROP_SIGN = [+1, -1]                             # 동축 쌍(up/dn)은 서로 반대 회전
+PROP_DUCTS = ["lb", "lf", "rb", "rf"]            
+PROP_LEAVES = ["_prop_up", "_prop_dn"]          
+PROP_SIGN = [+1, -1]                            
 VIS_RATE = 1500.0                                # 호버 추력 기준 회전속도 [deg/s], 취향껏
 
 
-class PropSpinner:
+class PropSpinner: # 회전 시각화
     def __init__(self, stage, num_envs):
-        self.items = []    # (xform_op, pivot, spin_axis, env, duct, sign)
+        self.items = []
         self.angles = []
         cache = UsdGeom.BBoxCache(
             Usd.TimeCode.Default(),
             [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
-
-        # prim 이름 -> (duct 인덱스, sign) 매핑. 예: "lb_prop_dn" -> (0, -1)
         name2info = {}
         for d, duct in enumerate(PROP_DUCTS):
             for j, suffix in enumerate(PROP_LEAVES):
@@ -161,25 +309,18 @@ class PropSpinner:
             for prim in Usd.PrimRange(root):
                 info = name2info.get(prim.GetName())
                 if info is None or not prim.IsA(UsdGeom.Xformable):
-                    continue  # 이름이 {duct}_prop_{up,dn} 인 Xformable prim만
+                    continue 
                 duct, sgn = info
-                # 부모 경로에 해당 덕트의 물리 링크가 있어야 함 -> 다른 서브트리의
-                # 동명 prim(돌면 안 되는 지오메트리)을 매칭에서 제외.
                 if f"/{PROP_DUCTS[duct]}_link2_01/" not in str(prim.GetPath()):
                     print(f"[SKIP] name matched but outside duct subtree: {prim.GetPath()}")
                     continue
-                # 이 prim은 비주얼 겸 충돌체로 변환된 prim이라, transform을 돌리면
-                # PhysX shape 재생성 -> tensor view invalidation이 발생한다.
-                # 프롭 충돌체는 불필요하므로(덕트 내부, 접촉은 팔/박스) 떼어내서
-                # 순수 비주얼 prim으로 만든다. sim.reset() 이전이라 안전.
-                # (applied schema는 instance prim 자신의 메타데이터라 인스턴스여도 편집 가능)
+
                 for schema in list(prim.GetAppliedSchemas()):
                     if "Collision" in schema or "Physx" in schema:
                         prim.RemoveAppliedSchema(schema)
-                # 회전축/피벗 계산: 하위 메시 정점 SVD (실패 시 bbox 중심 + 로컬 z로 폴백)
                 pivot, spin_axis = self._axis_from_mesh(prim, cache)
                 xf = UsdGeom.Xformable(prim)
-                op = xf.AddTransformOp(opSuffix="propspin")  # 맨 뒤 = 가장 안쪽(geometry에 먼저 적용)
+                op = xf.AddTransformOp(opSuffix="propspin")
                 self.items.append((op, pivot, spin_axis, e, duct, sgn))
                 self.angles.append(0.0)
                 print(f"[SPIN] env_{e} duct={PROP_DUCTS[duct]} sign={sgn:+d} -> {prim.GetPath()}")
@@ -191,12 +332,6 @@ class PropSpinner:
 
     @staticmethod
     def _axis_from_mesh(prim, cache):
-        """프롭 prim 하위 메시 정점에서 (피벗, 회전축)을 계산. 디스크 법선 = 최소 분산 방향.
-
-        프롭 prim이 Mesh 자체일 수도 있고, instanceable Xform 아래 인스턴스 프록시
-        Mesh일 수도 있다. TraverseInstanceProxies로 둘 다 커버하고, 정점은 각 메시의
-        로컬 프레임 -> 프롭 prim 프레임으로 변환해 합산한다 (xformOp는 prim에 걸리므로).
-        """
         pts_list = []
         xf_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         L2W = xf_cache.GetLocalToWorldTransform(prim)
@@ -208,7 +343,6 @@ class PropSpinner:
             raw = attr.Get() if attr else None
             if raw is None or len(raw) < 3:
                 continue
-            # 메시 -> 프롭 prim 프레임 변환 (Gf는 row-vector 컨벤션: x' = x * M)
             M = xf_cache.GetLocalToWorldTransform(p) * base_inv
             R = np.array([[M[i][j] for j in range(3)] for i in range(3)])
             t = np.array([M[3][0], M[3][1], M[3][2]])
@@ -217,17 +351,11 @@ class PropSpinner:
             pts = np.concatenate(pts_list, axis=0)
             ctr = pts.mean(axis=0)
             _, _, Vt = np.linalg.svd(pts - ctr, full_matrices=False)
-            axis = Vt[-1]  # 최소 특이방향 = 디스크 법선
-            # SVD 축은 부호가 임의 -> "월드" 기준으로 정규화한다.
-            # 로컬 지배성분 기준으로 맞추면, 비주얼 프레임이 미러/180도 뒤집힌
-            # 덕트(이 자산에선 rf)만 월드에서 반대로 돌게 된다.
-            # 스폰 시점은 수평 + 틸트 0이므로, 월드 z 성분이 +가 되도록 맞추면
-            # 네 덕트 모두 회전 방향 부호가 일관된다.
+            axis = Vt[-1]
             Rw = np.array([[L2W[i][j] for j in range(3)] for i in range(3)])
             if (axis @ Rw)[2] < 0:
                 axis = -axis
             return Gf.Vec3d(*ctr.tolist()), Gf.Vec3d(*axis.tolist())
-        # 폴백: 하위에서 메시를 못 찾으면 bbox 중심 + 로컬 z (이 경우 경고 출력)
         print(f"[WARN] no mesh points under {prim.GetPath()}, fallback to bbox+z")
         bound = cache.ComputeUntransformedBound(prim)
         pivot = Gf.Vec3d(bound.ComputeAlignedBox().GetMidpoint())
@@ -316,10 +444,17 @@ def main():
 
     scene = InteractiveScene(FlightSceneCfg(num_envs=args_cli.num_envs, env_spacing=4.0))
 
+    # ---- USD hard limits -------------------------------------------------------
+    # 중요: PhysX articulation이 만들어지는 sim.reset() 전에 stage의 revolute joint limit을 고친다.
+    stage = omni.usd.get_context().get_stage()
+    if not args_cli.disable_usd_limit_patch:
+        patch_manipulator_limits_in_usd(
+            stage, args_cli.num_envs, ARM_HOME, args_cli.arm_limit_span_deg,
+            direction=args_cli.arm_direction)
+
     # ---- visual prop spinner --------------------------------------------------
     # AddTransformOp / collision 제거는 USD 구조 변경이라 sim.reset() "이전"에 해야 함.
     # (sim 시작 후 하면 PhysX tensor view가 invalidate됨)
-    stage = omni.usd.get_context().get_stage()
     spinner = PropSpinner(stage, args_cli.num_envs)
 
     sim.reset()
@@ -342,9 +477,6 @@ def main():
     g = 9.81
     inertias = robot.root_physx_view.get_inertias()[0]
 
-    # whole-body inertia about the vehicle CoM (parallel axis).
-    # NOTE: 링크 "프레임 원점"(body_pos_w)이 아니라 링크 "CoM"(body_com_pos_w)을
-    # 기준으로 합산해야 함 — 검사 결과 원점 기반 J는 최대 57% 틀렸음 (Ixx 2.4배 차이).
     body_com = robot.data.body_com_pos_w[0].cpu()
     masses_cpu = masses.cpu()
     com0 = (body_com * masses_cpu.unsqueeze(-1)).sum(0) / m_tot
@@ -359,7 +491,8 @@ def main():
     # ---- initial state -------------------------------------------------------
     default_q = robot.data.default_joint_pos.clone()
     lims = robot.data.soft_joint_pos_limits[0]
-    default_q[0] = default_q[0].clamp(lims[:, 0] + 0.02, lims[:, 1] - 0.02)
+    # 시작각 자체가 2~4번 조인트의 하한이므로, 초기 상태를 margin만큼 밀어 넣지 않는다.
+    default_q = clamp_joint_tensor(default_q, lims[:, 0], lims[:, 1])
     root = robot.data.default_root_state.clone()
     root[:, :3] += scene.env_origins
     robot.write_root_pose_to_sim(root[:, :7])
@@ -367,9 +500,7 @@ def main():
     robot.write_joint_state_to_sim(default_q, torch.zeros_like(default_q))
     scene.reset()
 
-    # ---- allocation from CAD geometry (hardcoded, level pose) ----------------
-    # 모멘트암 (x_i, y_i)는 시뮬에서 읽지 않고 CAD 실측값(ROTOR_XY)을 사용한다.
-    # -> 링크 원점 vs CoM, 프레임 정렬 등 시뮬 의존 불확실성을 할당 모델에서 제거.
+    # ---- allocation ----------------
     x, y = ROTOR_XY[:, 0].clone(), ROTOR_XY[:, 1].clone()
     spins = torch.tensor([+1.0, -1.0, -1.0, +1.0])            # lb, lf, rb, rf (flip if yaw runs away)
     A = torch.stack([torch.ones(4), y, -x, spins * args_cli.k_drag], dim=0)
@@ -377,9 +508,7 @@ def main():
     f_hover = m_tot * g / 4.0
     f_max = 3.0 * f_hover
 
-    # 참고용 비교 출력: 시뮬에서 읽은 로터 링크 CoM 기준 오프셋 (할당에는 사용 안 함).
-    # NOTE: 이 자산은 링크 프레임 원점이 전부 루트에 몰려 있어 원점은 비교 의미가 없음.
-    #       CoM(body_com_pos_w)이 실제 질량분포 위치라 이것과 CAD 값을 대조한다.
+    # 참고용 비교 출력
     com = (robot.data.body_com_pos_w[0] * masses.unsqueeze(-1).to(device)).sum(0) / m_tot
     r_sim = (robot.data.body_com_pos_w[0, rotor_ids] - com)  # (4, 3), world ~ body at level
 
@@ -397,10 +526,72 @@ def main():
     for k, name in enumerate(arm_names):
         if name.startswith("dof_r"):
             arm_phase[k] = math.radians(args_cli.arm_phase)
+    # 관절별 최종 command limit을 계산한다.
+    # 핵심: dof_[lr][2-4]는 USD limit이 무엇이든 시작각 기준 한쪽 방향으로만 움직이게 한다.
+    # 실제 USD joint axis가 사람이 보는 팔 회전 방향과 반대로 잡힌 것으로 보여 기본값은 -방향이다.
+    # 필요하면 --arm_direction 1 로 이전(+방향) 테스트를 할 수 있다.
+    cmd_lo, cmd_hi, relative_arm_mask, constrained_arm_ids_t = build_joint_command_limits(
+        default_q[0], lims, arm_ids, arm_names,
+        math.radians(args_cli.arm_limit_span_deg), device,
+        direction=args_cli.arm_direction)
+
+    # 사인 궤적은 hard limit 바로 위/아래를 찍지 않도록 margin 안쪽에서 만든다.
+    # 단, 시작 자세는 실제 하한일 수 있으므로 q_arm 계산은 arm_center0(시작각)에서 부드럽게 출발한다.
+    arm_lo = cmd_lo[arm_ids_t]
+    arm_hi = cmd_hi[arm_ids_t]
+    arm_inner_lo, arm_inner_hi = make_inner_limits(arm_lo, arm_hi, args_cli.arm_limit_margin)
+    arm_center0 = default_q[0, arm_ids_t].clone()
+
+    finite_arm_limit = torch.isfinite(arm_lo) & torch.isfinite(arm_hi) & ((arm_hi - arm_lo) < 1.0e3)
+    rel_center = 0.5 * (arm_inner_lo + arm_inner_hi)
+    rel_amp_max = (0.5 * (arm_inner_hi - arm_inner_lo)).clamp(min=0.0)
+    nonrel_amp_max = torch.minimum(
+        arm_center0 - arm_inner_lo, arm_inner_hi - arm_center0).clamp(min=0.0)
+
+    arm_center = torch.where(relative_arm_mask, rel_center, arm_center0)
+
+    # 요청 반영: dof1도 움직이고, dof2는 더 크게 움직인다.
+    # dof2~4는 시작각 기준 한쪽 방향 limit(cmd_lo/cmd_hi)을 유지한다.
+    # dof1은 continuous일 수 있으므로 별도 진폭을 주고 기존 USD/soft limit 안에서만 움직인다.
+    arm_amp_request = torch.full_like(arm_lo, args_cli.arm_amp)
+    for k, name in enumerate(arm_names):
+        if name.endswith("1"):
+            arm_amp_request[k] = args_cli.arm_j1_amp
+        elif name.endswith("2"):
+            arm_amp_request[k] = args_cli.arm_amp * args_cli.arm_j2_scale
+    arm_amp_max = torch.where(relative_arm_mask, rel_amp_max, nonrel_amp_max)
+    arm_amp_j = torch.minimum(arm_amp_request, arm_amp_max).clamp(min=0.0)
+
+    # 좌우 EE 대칭 보정:
+    # 2~4번 joint 명령은 그대로 두고, 1번 joint만 좌우 각각 반대 부호로 보낸다.
+    # 현재 관측 기준으로 dof_l1과 dof_r1의 기존 명령 부호가 모두 EE를 위로 보내므로,
+    # dof_l1: args_cli.arm_direction 그대로, dof_r1: -args_cli.arm_direction 으로 설정한다.
+    # 기본 arm_direction=-1이면 dof_l1=-, dof_r1=+ 가 되어 양쪽 EE가 아래로 내려가도록 한다.
+    arm_motion_sign = torch.full_like(arm_lo, float(args_cli.arm_direction))
+    for k, name in enumerate(arm_names):
+        if name == "dof_r1":
+            arm_motion_sign[k] *= -1.0
+
     if args_cli.arm_mode == "sine":
-        print(f"[INFO]: arm sine test: amp={args_cli.arm_amp:.2f} rad, "
-              f"period={args_cli.arm_period:.1f} s, r-phase={args_cli.arm_phase:.0f} deg, "
-              f"start at t={arm_t0:.1f} s")
+        print(f"[INFO]: arm motion test: profile={args_cli.arm_profile}, "
+              f"direction={args_cli.arm_direction:+.0f}, "
+              f"j1_amp={math.degrees(args_cli.arm_j1_amp):.1f} deg, "
+              f"j2_scale={args_cli.arm_j2_scale:.2f}, "
+              f"period={args_cli.arm_period:.1f} s, "
+              f"r-phase={args_cli.arm_phase:.0f} deg, start at t={arm_t0:.1f} s")
+        for k, name in enumerate(arm_names):
+            if relative_arm_mask[k]:
+                tag = " relative-limit[start,+span]"
+            elif finite_arm_limit[k]:
+                tag = " usd-limited"
+            else:
+                tag = " continuous"
+            print(f"[INFO]:   {name}: start={math.degrees(arm_center0[k].item()):+.1f} deg, "
+                  f"cmd_limit=[{math.degrees(arm_lo[k].item()):+.1f}, "
+                  f"{math.degrees(arm_hi[k].item()):+.1f}] deg, "
+                  f"center={math.degrees(arm_center[k].item()):+.1f} deg, "
+                  f"amp={math.degrees(arm_amp_j[k].item()):.1f} deg, "
+                  f"sign={arm_motion_sign[k].item():+.0f} ({tag})")
 
     # smooth takeoff: blend from the spawn position to the reference over T_RAMP
     p0 = robot.data.root_pos_w.clone()
@@ -421,6 +612,7 @@ def main():
     arm_n = 0
     max_dev = 0.0    # 팔 동작 중 최대 위치 이탈 [m]
     max_tilt = 0.0   # 팔 동작 중 최대 기울기 [deg]
+    joint_limit_clamp_count = 0
 
     while simulation_app.is_running():
         # ---- ARM / TILT loop ---------------------------------------------------
@@ -432,11 +624,22 @@ def main():
             sa = min(ta / 2.0, 1.0)
             sa = sa * sa * (3.0 - 2.0 * sa)          # 팔 동작도 smoothstep으로 시작
             wa = 2.0 * math.pi / args_cli.arm_period
-            dq = args_cli.arm_amp * sa * torch.sin(
-                torch.tensor(wa * ta, device=device) + arm_phase)
-            q_target[:, arm_ids_t] += dq
-            # 관절 리밋 안쪽으로 클램프 (default_q와 동일한 마진)
-            q_target = q_target.clamp(lims[:, 0] + 0.02, lims[:, 1] - 0.02)
+            phase = torch.tensor(wa * ta, device=device) + arm_phase
+            if args_cli.arm_profile == "center_sine":
+                osc = arm_amp_j * torch.sin(phase)
+                # 기존 방식: 시작각 -> 중앙으로 블렌드 후 중앙 기준 사인.
+                # 리밋은 지키지만, 반주기 뒤에는 관절이 시작각 쪽으로 되돌아간다.
+                q_arm = arm_center0 + sa * (arm_center - arm_center0) + sa * osc
+            else:
+                # 안전 방식: 시작각 기준 한쪽 방향으로만 움직인다.
+                # 0.5*(1-cos)는 항상 [0,1]이고, arm_direction으로 실제 움직일 부호를 정한다.
+                # dof1도 같은 one-sided 프로파일로 움직인다.
+                # dof2는 위에서 arm_j2_scale이 적용되어 더 크게 움직인다.
+                one_sided = 0.5 * (1.0 - torch.cos(phase))
+                q_arm = arm_center0 + arm_motion_sign * sa * arm_amp_j * one_sided
+            q_target[:, arm_ids_t] = q_arm
+        # 명령 안전망: arm 2~4는 cmd_lo/cmd_hi가 시작각 기준 상대 제약으로 덮여 있다.
+        q_target = clamp_joint_tensor(q_target, cmd_lo, cmd_hi)
         robot.set_joint_position_target(q_target)
 
         # ---- DRONE loop: cascade PID -> per-rotor thrusts --------------------
@@ -470,6 +673,10 @@ def main():
         count += 1
         scene.update(sim_dt)
 
+        # 실제 joint state 안전망: USD hard limit이 적용되지 않았거나 관성 overshoot가 생긴 경우 즉시 복구한다.
+        joint_limit_clamp_count += clamp_actual_joint_state_to_limits(
+            robot, cmd_lo, cmd_hi, constrained_arm_ids_t)
+
         # accumulate diagnostics (after the takeoff ramp settles)
         if t > T_RAMP + 2.0:
             e = (p_d - robot.data.root_pos_w)[0]
@@ -495,7 +702,8 @@ def main():
             print(f"[t={t:6.2f}]{' [ARM]' if arm_active else '      '} "
                   f"pos err=({pe[0]:+.3f},{pe[1]:+.3f},{pe[2]:+.3f}) m | "
                   f"rp=({roll:+.1f},{pitch:+.1f}) deg | "
-                  f"f[N]={fr[0]:.2f} {fr[1]:.2f} {fr[2]:.2f} {fr[3]:.2f}")
+                  f"f[N]={fr[0]:.2f} {fr[1]:.2f} {fr[2]:.2f} {fr[3]:.2f} | "
+                  f"joint_limit_clamps={joint_limit_clamp_count}")
 
         if args_cli.max_time > 0.0 and t >= args_cli.max_time:
             if diag_n > 0:
@@ -510,6 +718,7 @@ def main():
                       f"n = {arm_n}")
             z = robot.data.root_pos_w[0, 2].item()
             print(f"[SUMMARY] final z = {z:.3f} m")
+            print(f"[SUMMARY] joint limit software clamp count = {joint_limit_clamp_count}")
             if diag_n == 0 and arm_n == 0:
                 print("[SUMMARY] sim ended before steady-state window")
             break
