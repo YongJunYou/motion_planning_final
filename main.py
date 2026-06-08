@@ -19,7 +19,11 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
+import numpy as np
 import torch
+
+from pxr import Usd, UsdGeom, UsdPhysics, Gf
+import omni.usd
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -32,7 +36,6 @@ from isaaclab.utils.math import matrix_from_quat
 # ----------------------------------------------------------------------------
 # 로봇 설정값
 # ----------------------------------------------------------------------------
-_D = math.radians
 ARM_HOME = {
     "dof_l1": 0.0, "dof_l2": 0.0, "dof_l3": 0.0, "dof_l4": 0.0,
     "dof_r1": 0.0, "dof_r2": 0.0, "dof_r3": 0.0, "dof_r4": 0.0,
@@ -96,6 +99,136 @@ class FlightSceneCfg(InteractiveSceneCfg):
 # ----------------------------------------------------------------------------
 def vee(s):
     return torch.stack([s[..., 2, 1], s[..., 0, 2], s[..., 1, 0]], dim=-1)
+
+
+# ----------------------------------------------------------------------------
+# Visual propeller spin (physics에 영향 없음)
+# ----------------------------------------------------------------------------
+# 프롭 링크 prim 자체의 transform은 PhysX가 매 스텝 덮어쓰므로,
+# 링크 밑 비주얼 스코프 안의 "프롭 prim"에 xformOp를 추가해 돌린다.
+# 구조: Robot/main_v10/main_v10/{duct}_link2_01/{duct}_link2_01/{duct}_prop_{up,dn}
+#       (물리 링크)        (비주얼 스코프)     (프롭 Xform, 이름으로 식별)
+#
+# - USD에서 프롭을 {duct}_prop_up / {duct}_prop_dn 으로 명시적으로 이름 붙여 둠
+#   (덕트 4개 x 동축 2개 = 총 8개). 이름이 유일하므로 이름 매칭이 곧 식별.
+# - 추가로 부모 경로에 해당 덕트의 물리 링크가 있는지 확인해서, 향후 다른
+#   서브트리에 동명 prim이 생겨도 같이 도는 것을 방지한다.
+# - 프롭 prim은 instanceable Xform이고 실제 Mesh는 프로토타입 참조(인스턴스
+#   프록시)로 그 아래에 있다. 따라서 정점은 TraverseInstanceProxies로 하위
+#   Mesh를 찾아 읽고, 프롭 prim 로컬 프레임으로 변환해 사용한다.
+# - 회전축/피벗은 메시 정점에서 직접 계산한다: 프롭은 얇은 디스크라
+#   정점 공분산의 최소 고유벡터(SVD 최소 특이방향) = 디스크 법선 = 회전축,
+#   centroid = 피벗. 메시 로컬 프레임이 CAD에서 틀어져 있어도 자동으로 맞아
+#   세차운동처럼 삐딱하게 도는 문제가 없다.
+PROP_DUCTS = ["lb", "lf", "rb", "rf"]            # f의 열 인덱스 순서
+PROP_LEAVES = ["_prop_up", "_prop_dn"]           # 덕트당 동축 프롭 2개 (USD prim 이름 suffix)
+PROP_SIGN = [+1, -1]                             # 동축 쌍(up/dn)은 서로 반대 회전
+VIS_RATE = 1500.0                                # 호버 추력 기준 회전속도 [deg/s], 취향껏
+
+
+class PropSpinner:
+    def __init__(self, stage, num_envs):
+        self.items = []    # (xform_op, pivot, spin_axis, env, duct, sign)
+        self.angles = []
+        cache = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(),
+            [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+
+        # prim 이름 -> (duct 인덱스, sign) 매핑. 예: "lb_prop_dn" -> (0, -1)
+        name2info = {}
+        for d, duct in enumerate(PROP_DUCTS):
+            for j, suffix in enumerate(PROP_LEAVES):
+                name2info[duct + suffix] = (d, PROP_SIGN[j])
+
+        for e in range(num_envs):
+            root_path = f"/World/envs/env_{e}/Robot"
+            root = stage.GetPrimAtPath(root_path)
+            if not root.IsValid():
+                print(f"[WARN] robot root not found: {root_path}")
+                continue
+            n_before = len(self.items)
+            for prim in Usd.PrimRange(root):
+                info = name2info.get(prim.GetName())
+                if info is None or not prim.IsA(UsdGeom.Xformable):
+                    continue  # 이름이 {duct}_prop_{up,dn} 인 Xformable prim만
+                duct, sgn = info
+                # 부모 경로에 해당 덕트의 물리 링크가 있어야 함 -> 다른 서브트리의
+                # 동명 prim(돌면 안 되는 지오메트리)을 매칭에서 제외.
+                if f"/{PROP_DUCTS[duct]}_link2_01/" not in str(prim.GetPath()):
+                    print(f"[SKIP] name matched but outside duct subtree: {prim.GetPath()}")
+                    continue
+                # 이 prim은 비주얼 겸 충돌체로 변환된 prim이라, transform을 돌리면
+                # PhysX shape 재생성 -> tensor view invalidation이 발생한다.
+                # 프롭 충돌체는 불필요하므로(덕트 내부, 접촉은 팔/박스) 떼어내서
+                # 순수 비주얼 prim으로 만든다. sim.reset() 이전이라 안전.
+                # (applied schema는 instance prim 자신의 메타데이터라 인스턴스여도 편집 가능)
+                for schema in list(prim.GetAppliedSchemas()):
+                    if "Collision" in schema or "Physx" in schema:
+                        prim.RemoveAppliedSchema(schema)
+                # 회전축/피벗 계산: 하위 메시 정점 SVD (실패 시 bbox 중심 + 로컬 z로 폴백)
+                pivot, spin_axis = self._axis_from_mesh(prim, cache)
+                xf = UsdGeom.Xformable(prim)
+                op = xf.AddTransformOp(opSuffix="propspin")  # 맨 뒤 = 가장 안쪽(geometry에 먼저 적용)
+                self.items.append((op, pivot, spin_axis, e, duct, sgn))
+                self.angles.append(0.0)
+                print(f"[SPIN] env_{e} duct={PROP_DUCTS[duct]} sign={sgn:+d} -> {prim.GetPath()}")
+            n_expected = len(PROP_DUCTS) * len(PROP_LEAVES)
+            if len(self.items) - n_before != n_expected:
+                print(f"[WARN] env_{e}: expected {n_expected} prop prims, "
+                      f"got {len(self.items) - n_before}")
+        print(f"[INFO]: PropSpinner attached to {len(self.items)} visual prims")
+
+    @staticmethod
+    def _axis_from_mesh(prim, cache):
+        """프롭 prim 하위 메시 정점에서 (피벗, 회전축)을 계산. 디스크 법선 = 최소 분산 방향.
+
+        프롭 prim이 Mesh 자체일 수도 있고, instanceable Xform 아래 인스턴스 프록시
+        Mesh일 수도 있다. TraverseInstanceProxies로 둘 다 커버하고, 정점은 각 메시의
+        로컬 프레임 -> 프롭 prim 프레임으로 변환해 합산한다 (xformOp는 prim에 걸리므로).
+        """
+        pts_list = []
+        xf_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+        L2W = xf_cache.GetLocalToWorldTransform(prim)
+        base_inv = L2W.GetInverse()
+        for p in Usd.PrimRange(prim, Usd.TraverseInstanceProxies()):
+            if not p.IsA(UsdGeom.Mesh):
+                continue
+            attr = UsdGeom.Mesh(p).GetPointsAttr()
+            raw = attr.Get() if attr else None
+            if raw is None or len(raw) < 3:
+                continue
+            # 메시 -> 프롭 prim 프레임 변환 (Gf는 row-vector 컨벤션: x' = x * M)
+            M = xf_cache.GetLocalToWorldTransform(p) * base_inv
+            R = np.array([[M[i][j] for j in range(3)] for i in range(3)])
+            t = np.array([M[3][0], M[3][1], M[3][2]])
+            pts_list.append(np.asarray(raw, dtype=np.float64) @ R + t)
+        if pts_list:
+            pts = np.concatenate(pts_list, axis=0)
+            ctr = pts.mean(axis=0)
+            _, _, Vt = np.linalg.svd(pts - ctr, full_matrices=False)
+            axis = Vt[-1]  # 최소 특이방향 = 디스크 법선
+            # SVD 축은 부호가 임의 -> "월드" 기준으로 정규화한다.
+            # 로컬 지배성분 기준으로 맞추면, 비주얼 프레임이 미러/180도 뒤집힌
+            # 덕트(이 자산에선 rf)만 월드에서 반대로 돌게 된다.
+            # 스폰 시점은 수평 + 틸트 0이므로, 월드 z 성분이 +가 되도록 맞추면
+            # 네 덕트 모두 회전 방향 부호가 일관된다.
+            Rw = np.array([[L2W[i][j] for j in range(3)] for i in range(3)])
+            if (axis @ Rw)[2] < 0:
+                axis = -axis
+            return Gf.Vec3d(*ctr.tolist()), Gf.Vec3d(*axis.tolist())
+        # 폴백: 하위에서 메시를 못 찾으면 bbox 중심 + 로컬 z (이 경우 경고 출력)
+        print(f"[WARN] no mesh points under {prim.GetPath()}, fallback to bbox+z")
+        bound = cache.ComputeUntransformedBound(prim)
+        pivot = Gf.Vec3d(bound.ComputeAlignedBox().GetMidpoint())
+        return pivot, Gf.Vec3d(0, 0, 1)
+
+    def update(self, f, spins, f_hover, dt):
+        for i, (op, c, axis, e, duct, sgn) in enumerate(self.items):
+            rate = VIS_RATE * float(f[e, duct]) / f_hover
+            self.angles[i] = (self.angles[i] + sgn * float(spins[duct]) * rate * dt) % 360.0
+            R = Gf.Matrix4d().SetRotate(Gf.Rotation(axis, self.angles[i]))
+            M = Gf.Matrix4d().SetTranslate(-c) * R * Gf.Matrix4d().SetTranslate(c)
+            op.Set(M)
 
 
 # ----------------------------------------------------------------------------
@@ -171,6 +304,13 @@ def main():
     sim.set_camera_view(eye=[2.5, 2.5, 2.0], target=[0.0, 0.0, 1.0])
 
     scene = InteractiveScene(FlightSceneCfg(num_envs=args_cli.num_envs, env_spacing=4.0))
+
+    # ---- visual prop spinner --------------------------------------------------
+    # AddTransformOp / collision 제거는 USD 구조 변경이라 sim.reset() "이전"에 해야 함.
+    # (sim 시작 후 하면 PhysX tensor view가 invalidate됨)
+    stage = omni.usd.get_context().get_stage()
+    spinner = PropSpinner(stage, args_cli.num_envs)
+
     sim.reset()
 
     robot: Articulation = scene["robot"]
@@ -276,6 +416,9 @@ def main():
         forces[..., 2] = f                                          # thrust along rotor local +z
         torques[..., 2] = spins.to(device) * args_cli.k_drag * f    # drag yaw model
         robot.set_external_force_and_torque(forces, torques, body_ids=rotor_ids)
+
+        # ---- visual prop spin (추력에 비례, 물리 영향 없음) -------------------
+        spinner.update(f, spins, f_hover, sim_dt)
 
         scene.write_data_to_sim()
         sim.step()
