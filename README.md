@@ -6,3 +6,12 @@
 
 실행명령어 (conda 사용중)
 (env_isaacsim) yyj@larr-yyj:~/IsaacLab/IsaacLab$ ./isaaclab.sh -p ~/motion_planning_final/main.py --mode hover
+
+토픽 안뜰경우
+unset PYTHONPATH
+unset AMENT_PREFIX_PATH
+unset COLCON_PREFIX_PATH
+
+export ROS_DISTRO=humble
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/humble/lib
