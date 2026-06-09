@@ -68,12 +68,6 @@ J_BASE_DIAG = torch.tensor([0.0819, 0.1563, 0.2341])
 K_DRAG = 0.02 
 
 # ----------------------------------------------------------------------------
-# 높이 비교용 기준 상자
-# ----------------------------------------------------------------------------
-REFERENCE_BOX_SIZE = (1.0, 1.0, 2.0)  # 가로 x 세로 x 높이 [m]
-REFERENCE_BOX_POS = (1.5, 0.0, REFERENCE_BOX_SIZE[2] / 2.0)
-
-# ----------------------------------------------------------------------------
 # Visual propeller spin (physics에 영향 없음)
 # ----------------------------------------------------------------------------
 PROP_DUCTS = ["lb", "lf", "rb", "rf"]            # thrusts의 열 인덱스 순서
@@ -87,7 +81,7 @@ VIS_RATE = 1500.0                                # 호버 추력 기준 회전�
 TILTROTOR_CFG = ArticulationCfg(
     # 스폰방식 지정
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/yyj/motion_planning_final/dual_arm_new.usd",   
+        usd_path="/home/yyj/motion_planning_final/dual_arm_final.usd",   
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             articulation_enabled=True,           # PhysX articulation(reduced-coordinate 강체 체인)으로 시뮬레이션(고정값)
             fix_root_link=False,                 # 고정 또는 비행
@@ -120,17 +114,6 @@ class FlightSceneCfg(InteractiveSceneCfg):
     # 씬 관련 설정
     ground = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
     light = AssetBaseCfg(prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)))
-    height_reference_box = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/height_reference_box",
-        spawn=sim_utils.CuboidCfg(
-            size=REFERENCE_BOX_SIZE,
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.0, 0.65, 1.0),
-                opacity=0.35,
-            ),
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=REFERENCE_BOX_POS),
-    )
     robot: ArticulationCfg = TILTROTOR_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
 # ----------------------------------------------------------------------------
@@ -549,24 +532,32 @@ def make_smooth_reference(t, p0, num_envs, device, ramp_time):
 
     s = min(t / ramp_time, 1.0)
     s = s * s * (3.0 - 2.0 * s)  # smoothstep
-    p_d = (1.0 - s) * p0 + s * p_d
+    p_d = (1.0 - s) * p0 + s * p_d  
     v_d = s * v_d
     a_d = s * a_d
+    yaw_d = s * yaw_d
     return p_d, v_d, a_d, yaw_d
 
 def reference(t, mode, radius, period, height, N, device):
     if mode == "hover":
-        p = torch.tensor([0.0, 0.0, height], device=device).repeat(N, 1)
-        v = torch.zeros(N, 3, device=device)
-        a = torch.zeros(N, 3, device=device)
-    else:
+        p_d = torch.tensor([0.0, 0.0, height], device=device).repeat(N, 1)
+        v_d = torch.zeros(N, 3, device=device)
+        a_d = torch.zeros(N, 3, device=device)
+        yaw_d = torch.zeros(N, device=device)
+    else: # circle mode
         w = 2 * math.pi / period
-        c, s = math.cos(w * t), math.sin(w * t)
-        p = torch.tensor([radius * c, radius * s, height], device=device).repeat(N, 1)
-        v = torch.tensor([-radius * w * s, radius * w * c, 0.0], device=device).repeat(N, 1)
-        a = torch.tensor([-radius * w * w * c, -radius * w * w * s, 0.0], device=device).repeat(N, 1)
-    yaw = torch.zeros(N, device=device)
-    return p, v, a, yaw
+        c, sin_t = math.cos(w * t), math.sin(w * t)
+        vx = -radius * w * sin_t
+        vy = radius * w * c
+        p_d = torch.tensor([radius * c, radius * sin_t, height], device=device).repeat(N, 1)
+        v_d = torch.tensor([vx, vy, 0.0], device=device).repeat(N, 1)
+        a_d = torch.tensor([-radius * w * w * c, -radius * w * w * sin_t, 0.0], device=device).repeat(N, 1)
+        speed_xy = math.hypot(vx, vy)
+        velocity_heading = math.atan2(vy, vx) if speed_xy > 1.0e-9 else 0.0
+        # Desired body -Y axis points along the velocity direction.
+        yaw_value = velocity_heading + 0.5 * math.pi
+        yaw_d = torch.full((N,), yaw_value, device=device)
+    return p_d, v_d, a_d, yaw_d
 
 def compute_rotor_thrusts(ctrl, robot, p_d, v_d, a_d, yaw_d, A_inv, thrust_max, sim_dt):
     """cascade PID 출력 [thrust_total, tau]를 rotor별 thrusts로 변환한다."""
