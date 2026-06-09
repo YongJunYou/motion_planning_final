@@ -1,19 +1,17 @@
 import argparse
 import math
+import os
 from dataclasses import dataclass
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="DAAM flight demo (quadrotor mode).")
+
+parser = argparse.ArgumentParser(description="Tiltrotor flight demo.")
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--mode", type=str, default="hover", choices=["hover", "circle"])
-parser.add_argument("--radius", type=float, default=0.8, help="Circle radius [m].")
+parser.add_argument("--radius", type=float, default=2.0, help="Circle radius [m].")
 parser.add_argument("--period", type=float, default=8.0, help="Circle period [s].")
 parser.add_argument("--ref_height", type=float, default=1.8, help="Hover altitude [m].")
-parser.add_argument("--k_drag", type=float, default=0.02,
-                    help="Rotor drag torque / thrust ratio [m] (yaw model).")
-parser.add_argument("--max_time", type=float, default=0.0,
-                    help="If >0, stop the sim after this many seconds (for tuning).")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -22,9 +20,8 @@ simulation_app = app_launcher.app
 
 import numpy as np
 import torch
-
-from pxr import Usd, UsdGeom, UsdPhysics, Gf
 import omni.usd
+from pxr import Gf, Usd, UsdGeom
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -33,6 +30,7 @@ from isaaclab.assets.articulation import Articulation, ArticulationCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import matrix_from_quat
+
 
 # ----------------------------------------------------------------------------
 # 로봇 home 상태로 각도기준 설정
@@ -59,10 +57,37 @@ ROTOR_XY = torch.tensor([
     [+0.18, -0.18],   # rf (rf_link2_01)
 ])
 
-DAAM_CFG = ArticulationCfg(
+# ----------------------------------------------------------------------------
+# moment of inertia of the base (kg*m^2), onshape에서 받아온 값
+# ---------------------------------------------------------------------------
+J_BASE_DIAG = torch.tensor([0.0819, 0.1563, 0.2341])
+
+# ----------------------------------------------------------------------------
+ # rotor drag torque / thrust ratio [m], 대충 넣음
+# ---------------------------------------------------------------------------
+K_DRAG = 0.02 
+
+# ----------------------------------------------------------------------------
+# 높이 비교용 기준 상자
+# ----------------------------------------------------------------------------
+REFERENCE_BOX_SIZE = (1.0, 1.0, 2.0)  # 가로 x 세로 x 높이 [m]
+REFERENCE_BOX_POS = (1.5, 0.0, REFERENCE_BOX_SIZE[2] / 2.0)
+
+# ----------------------------------------------------------------------------
+# Visual propeller spin (physics에 영향 없음)
+# ----------------------------------------------------------------------------
+PROP_DUCTS = ["lb", "lf", "rb", "rf"]            # thrusts의 열 인덱스 순서
+PROP_LEAVES = ["_prop_up", "_prop_dn"]           # 덕트당 동축 프롭 2개 (USD prim 이름 suffix)
+PROP_SIGN = [+1, -1]                             # 동축 쌍(up/dn)은 서로 반대 회전
+VIS_RATE = 1500.0                                # 호버 추력 기준 회전속도 [deg/s], 취향껏
+
+# ----------------------------------------------------------------------------
+# Visual propeller spin (physics에 영향 없음)
+# ----------------------------------------------------------------------------
+TILTROTOR_CFG = ArticulationCfg(
     # 스폰방식 지정
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/yyj/motion_planning_final/dual_arm.usd",   
+        usd_path="/home/yyj/motion_planning_final/dual_arm_new.usd",   
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             articulation_enabled=True,           # PhysX articulation(reduced-coordinate 강체 체인)으로 시뮬레이션(고정값)
             fix_root_link=False,                 # 고정 또는 비행
@@ -87,32 +112,48 @@ DAAM_CFG = ArticulationCfg(
         ),
     },
 )
-
-
+# ----------------------------------------------------------------------------
+# isaaclab config
+# ---------------------------------------------------------------------------
 @configclass
 class FlightSceneCfg(InteractiveSceneCfg):
     # 씬 관련 설정
     ground = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
     light = AssetBaseCfg(prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)))
-    robot: ArticulationCfg = DAAM_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-
+    height_reference_box = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/height_reference_box",
+        spawn=sim_utils.CuboidCfg(
+            size=REFERENCE_BOX_SIZE,
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.0, 0.65, 1.0),
+                opacity=0.35,
+            ),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=REFERENCE_BOX_POS),
+    )
+    robot: ArticulationCfg = TILTROTOR_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
 # ----------------------------------------------------------------------------
-# math helpers
+# control loop state
 # ----------------------------------------------------------------------------
-def vee(s):
-    return torch.stack([s[..., 2, 1], s[..., 0, 2], s[..., 1, 0]], dim=-1)
-
+@dataclass
+class ControlLoopState:
+    t: float
+    count: int
+    device: torch.device
+    N: int
+    default_q: torch.Tensor
+    spins: torch.Tensor
+    A_inv: torch.Tensor
+    thrust_hover: float
+    thrust_max: float
+    p0: torch.Tensor
+    ramp_time: float
+    sim_dt: float
 
 # ----------------------------------------------------------------------------
-# Visual propeller spin (physics에 영향 없음)
+# 프로펠러 시각화용
 # ----------------------------------------------------------------------------
-PROP_DUCTS = ["lb", "lf", "rb", "rf"]            # thrusts의 열 인덱스 순서
-PROP_LEAVES = ["_prop_up", "_prop_dn"]           # 덕트당 동축 프롭 2개 (USD prim 이름 suffix)
-PROP_SIGN = [+1, -1]                             # 동축 쌍(up/dn)은 서로 반대 회전
-VIS_RATE = 1500.0                                # 호버 추력 기준 회전속도 [deg/s], 취향껏
-
-
 class PropSpinner:
     def __init__(self, stage, num_envs):
         self.items = []    # (xform_op, pivot, spin_axis, env, duct, sign)
@@ -196,6 +237,145 @@ class PropSpinner:
             M = Gf.Matrix4d().SetTranslate(-c) * R * Gf.Matrix4d().SetTranslate(c)
             op.Set(M)
 
+# ----------------------------------------------------------------------------
+# ROS2 debug publisher
+# ----------------------------------------------------------------------------
+class Ros2CurrentPublisher:
+    """Publish current sim values for ROS2 debugging.
+
+    Topics:
+      /tiltrotor/current/odom             nav_msgs/Odometry
+      /tiltrotor/current/pose             geometry_msgs/PoseStamped
+      /tiltrotor/current/path             nav_msgs/Path
+      /tiltrotor/current/rotor_thrusts    std_msgs/Float32MultiArray
+      /tiltrotor/current/wrench           geometry_msgs/WrenchStamped, CAD-origin body wrench
+    """
+
+    def __init__(self, frame_id="world", child_frame_id="base_link", path_max=4000,
+                 spins=None, k_drag=K_DRAG):
+        # Pull in Isaac Sim's internal ROS2 Humble libs before importing rclpy.
+        # This avoids loading a system ROS2 rclpy built for a different Python.
+        os.environ.setdefault("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp")
+        try:
+            from isaacsim.core.utils.extensions import enable_extension
+            enable_extension("isaacsim.ros2.bridge")
+            for _ in range(5):
+                simulation_app.update()
+        except Exception as exc:
+            print(f"[WARN]: Failed to enable Isaac Sim ROS2 bridge extension ({exc}).")
+
+        import rclpy
+        from geometry_msgs.msg import PoseStamped, WrenchStamped
+        from nav_msgs.msg import Odometry, Path
+        from std_msgs.msg import Float32MultiArray
+
+        if not rclpy.ok():
+            rclpy.init(args=[])
+
+        self.rclpy = rclpy
+        self.Odometry = Odometry
+        self.Path = Path
+        self.PoseStamped = PoseStamped
+        self.WrenchStamped = WrenchStamped
+        self.Float32MultiArray = Float32MultiArray
+
+        self.node = rclpy.create_node("isaaclab_tiltrotor_debug")
+        self.pub_odom = self.node.create_publisher(Odometry, "/tiltrotor/current/odom", 10)
+        self.pub_pose = self.node.create_publisher(PoseStamped, "/tiltrotor/current/pose", 10)
+        self.pub_path = self.node.create_publisher(Path, "/tiltrotor/current/path", 10)
+        self.pub_thrusts = self.node.create_publisher(
+            Float32MultiArray, "/tiltrotor/current/rotor_thrusts", 10)
+        self.pub_wrench = self.node.create_publisher(
+            WrenchStamped, "/tiltrotor/current/wrench", 10)
+
+        self.frame_id = frame_id
+        self.child_frame_id = child_frame_id
+        self.path_max = path_max
+        self.spins = (spins.detach().clone().float().cpu()
+                      if spins is not None else torch.tensor([+1.0, -1.0, -1.0, +1.0]))
+        self.k_drag = float(k_drag)
+        self.path = Path()
+        self.path.header.frame_id = frame_id
+
+        print(f"[INFO]: rclpy loaded from: {getattr(rclpy, '__file__', '<unknown>')}")
+        print(f"[INFO]: ROS_DOMAIN_ID={os.environ.get('ROS_DOMAIN_ID', '0')} "
+              f"RMW_IMPLEMENTATION={os.environ.get('RMW_IMPLEMENTATION', '<unset>')}")
+        self.rclpy.spin_once(self.node, timeout_sec=0.0)
+        self.print_local_topics()
+
+    def print_local_topics(self):
+        topic_names = [name for name, _ in self.node.get_topic_names_and_types()
+                       if name.startswith("/tiltrotor")]
+        if topic_names:
+            print("[INFO]: ROS2 topics visible from publisher node:")
+            for name in sorted(topic_names):
+                print(f"        {name}")
+        else:
+            print("[WARN]: ROS2 publisher node does not see /tiltrotor topics yet.")
+
+    def _pose_msg(self, stamp, pos, quat_wxyz):
+        pose = self.PoseStamped()
+        pose.header.stamp = stamp
+        pose.header.frame_id = self.frame_id
+        pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = map(float, pos)
+
+        # Isaac stores quaternions as (w, x, y, z), ROS messages use (x, y, z, w).
+        pose.pose.orientation.x = float(quat_wxyz[1])
+        pose.pose.orientation.y = float(quat_wxyz[2])
+        pose.pose.orientation.z = float(quat_wxyz[3])
+        pose.pose.orientation.w = float(quat_wxyz[0])
+        return pose
+
+    def _wrench_msg(self, stamp, thrusts):
+        thrusts_cpu = thrusts.detach().float().cpu()
+        forces, torques = compute_cad_wrench_from_thrusts(
+            thrusts_cpu, self.spins, self.k_drag, thrusts_cpu.device)
+        force = forces[0, 0]
+        torque = torques[0, 0]
+
+        wrench = self.WrenchStamped()
+        wrench.header.stamp = stamp
+        wrench.header.frame_id = self.child_frame_id
+        wrench.wrench.force.x, wrench.wrench.force.y, wrench.wrench.force.z = map(float, force)
+        wrench.wrench.torque.x, wrench.wrench.torque.y, wrench.wrench.torque.z = map(float, torque)
+        return wrench
+
+    def publish(self, robot, thrusts):
+        stamp = self.node.get_clock().now().to_msg()
+        pos = robot.data.root_pos_w[0].tolist()
+        quat = robot.data.root_quat_w[0].tolist()
+        lin_vel = robot.data.root_lin_vel_w[0].tolist()
+        ang_vel_b = robot.data.root_ang_vel_b[0].tolist()
+
+        pose = self._pose_msg(stamp, pos, quat)
+        self.pub_pose.publish(pose)
+
+        odom = self.Odometry()
+        odom.header.stamp = stamp
+        odom.header.frame_id = self.frame_id
+        odom.child_frame_id = self.child_frame_id
+        odom.pose.pose = pose.pose
+        odom.twist.twist.linear.x, odom.twist.twist.linear.y, odom.twist.twist.linear.z = map(float, lin_vel)
+        odom.twist.twist.angular.x, odom.twist.twist.angular.y, odom.twist.twist.angular.z = map(float, ang_vel_b)
+        self.pub_odom.publish(odom)
+
+        thrust_msg = self.Float32MultiArray()
+        thrust_msg.data = [float(v) for v in thrusts[0].tolist()]
+        self.pub_thrusts.publish(thrust_msg)
+        self.pub_wrench.publish(self._wrench_msg(stamp, thrusts))
+
+        self.path.poses.append(pose)
+        if len(self.path.poses) > self.path_max:
+            self.path.poses = self.path.poses[-self.path_max:]
+        self.path.header.stamp = stamp
+        self.pub_path.publish(self.path)
+
+        self.rclpy.spin_once(self.node, timeout_sec=0.0)
+
+    def shutdown(self):
+        self.node.destroy_node()
+        if self.rclpy.ok():
+            self.rclpy.shutdown()
 
 # ----------------------------------------------------------------------------
 # Drone cascade PID (position -> attitude) producing [thrust_total, tau]
@@ -207,13 +387,13 @@ class DronePID:
         self.device = device
 
         # 위치제어 PID Gains 
-        self.Kp_pos = torch.tensor([5.0, 5.0, 12.0], device=device)
-        self.Ki_pos = torch.tensor([0.8, 0.8, 3.0], device=device)
-        self.Kd_pos = torch.tensor([4.0, 4.0, 7.0], device=device)
+        self.Kp_pos = torch.tensor([7.5, 7.5, 18.0], device=device)
+        self.Ki_pos = torch.tensor([1.2, 1.2, 4.5], device=device)
+        self.Kd_pos = torch.tensor([5.2, 5.2, 9.0], device=device)
 
         # 자세제어 PID Gains 
-        self.Kp_att = torch.tensor([90.0, 90.0, 25.0], device=device)
-        self.Kd_att = torch.tensor([14.0, 14.0, 6.0], device=device)
+        self.Kp_att = torch.tensor([300.0, 300.0, 90.0], device=device)
+        self.Kd_att = torch.tensor([35.0, 35.0, 18.0], device=device)
 
         # 내부변수
         self._int_e_p = torch.zeros(num_envs, 3, device=device) # I제어용 적분기
@@ -251,43 +431,11 @@ class DronePID:
         tau = torch.einsum("ij,nj->ni", self.J, a_ang) + torch.cross(omega_b, Jw, dim=-1)
         return thrust_total, tau
 
-
 # ----------------------------------------------------------------------------
-def reference(t, mode, radius, period, height, N, device):
-    if mode == "hover":
-        p = torch.tensor([0.0, 0.0, height], device=device).repeat(N, 1)
-        v = torch.zeros(N, 3, device=device)
-        a = torch.zeros(N, 3, device=device)
-    else:
-        w = 2 * math.pi / period
-        c, s = math.cos(w * t), math.sin(w * t)
-        p = torch.tensor([radius * c, radius * s, height], device=device).repeat(N, 1)
-        v = torch.tensor([-radius * w * s, radius * w * c, 0.0], device=device).repeat(N, 1)
-        a = torch.tensor([-radius * w * w * c, -radius * w * w * s, 0.0], device=device).repeat(N, 1)
-    yaw = torch.zeros(N, device=device)
-    return p, v, a, yaw
-
-
+# math helpers
 # ----------------------------------------------------------------------------
-# control loop state
-# ----------------------------------------------------------------------------
-@dataclass
-class ControlLoopState:
-    t: float
-    count: int
-    diag_err2: torch.Tensor
-    diag_n: int
-    device: torch.device
-    N: int
-    default_q: torch.Tensor
-    spins: torch.Tensor
-    A_inv: torch.Tensor
-    thrust_hover: float
-    thrust_max: float
-    p0: torch.Tensor
-    ramp_time: float
-    sim_dt: float
-
+def vee(s):
+    return torch.stack([s[..., 2, 1], s[..., 0, 2], s[..., 1, 0]], dim=-1)
 
 # ----------------------------------------------------------------------------
 # main loop helpers
@@ -308,37 +456,65 @@ def setup_sim_scene_and_robot():
     robot: Articulation = scene["robot"]
     return sim, scene, spinner, robot
 
-
 def find_robot_handles(robot):
     """루프에서 필요한 body/joint id를 한곳에서 찾는다."""
-    robot.find_bodies("base_link_01")
-    rotor_ids, rotor_names = robot.find_bodies(
+    root_body_ids = [0]
+    base_ids, base_names = robot.find_bodies("base_link_01")
+    _rotor_ids, rotor_names = robot.find_bodies(
         ["lb_link2_01", "lf_link2_01", "rb_link2_01", "rf_link2_01"])
     robot.find_joints(["dof_[lr][1-4]"])
     robot.find_joints(["dof_[lr][bf][12]"])
-    return rotor_ids, rotor_names
+    root_name = robot.body_names[0] if robot.body_names else "<unknown>"
+    print(f"[INFO]: wrench body = root body[0] '{root_name}'")
+    if len(base_ids) > 0:
+        print(f"[INFO]: base_link_01 body match = {list(zip(base_ids, base_names))}")
+    else:
+        print("[WARN]: base_link_01 body match not found")
+    return root_body_ids, rotor_names
 
-
-def compute_whole_body_inertia(robot, device):
-    """링크 CoM 기준으로 전체 질량/관성행렬을 계산한다."""
-    masses = robot.root_physx_view.get_masses()[0]
-    inertias = robot.root_physx_view.get_inertias()[0]
-    m_tot = masses.sum().item()
+def get_mass_and_base_inertia(robot, device):
+    """전체 질량과 팔 2개를 제외한 하드코딩 base 관성행렬을 반환한다."""
+    m_total = robot.root_physx_view.get_masses()[0].sum().item()
     g = 9.81
 
-    body_com = robot.data.body_com_pos_w[0].cpu()
-    masses_cpu = masses.cpu()
-    com0 = (body_com * masses_cpu.unsqueeze(-1)).sum(0) / m_tot
+    J_base = torch.diag(J_BASE_DIAG).to(device=device, dtype=torch.float32)
+    return m_total, g, J_base
 
-    J = torch.zeros(3, 3)
-    eye = torch.eye(3)
-    for b in range(len(masses)):
-        Ib = inertias[b].reshape(3, 3).cpu()
-        d = body_com[b] - com0
-        J += Ib + masses_cpu[b] * ((d @ d) * eye - torch.outer(d, d))
+def print_wrench_body_com_debug(robot, body_ids):
+    """wrench 적용 body 원점 기준 inertial CoM 위치를 한 번 출력한다."""
+    base_idx = int(body_ids[0])
+    masses = robot.root_physx_view.get_masses()[0]
+    body_name = robot.body_names[base_idx] if robot.body_names else f"body_{base_idx}"
 
-    return masses, m_tot, g, J.to(device).float()
+    link_pos_w = robot.data.body_pos_w[0, base_idx]
+    link_quat_w = robot.data.body_quat_w[0, base_idx]
+    com_pos_w = robot.data.body_com_pos_w[0, base_idx]
 
+    R_wb = matrix_from_quat(link_quat_w.unsqueeze(0))[0]
+    com_offset_b = R_wb.transpose(0, 1) @ (com_pos_w - link_pos_w)
+
+    print(f"[INFO]: wrench body '{body_name}' mass properties:")
+    print(f"        mass = {float(masses[base_idx]):.6f} kg")
+    print(f"        link origin world = {link_pos_w.detach().cpu().numpy().round(6)}")
+    print(f"        inertial CoM world = {com_pos_w.detach().cpu().numpy().round(6)}")
+    print(f"        CoM offset in wrench body frame = "
+          f"{com_offset_b.detach().cpu().numpy().round(6)} m")
+
+def print_whole_body_com_debug(robot):
+    """전체 articulation CoM이 root link 원점에서 얼마나 떨어졌는지 출력한다."""
+    masses = robot.root_physx_view.get_masses()[0].to(robot.device)
+    body_com = robot.data.body_com_pos_w[0]
+    whole_com_w = (body_com * masses.unsqueeze(-1)).sum(0) / masses.sum()
+    root_pos_w = robot.data.root_pos_w[0]
+    root_quat_w = robot.data.root_quat_w[0]
+    R_wr = matrix_from_quat(root_quat_w.unsqueeze(0))[0]
+    com_offset_root = R_wr.transpose(0, 1) @ (whole_com_w - root_pos_w)
+
+    print("[INFO]: whole-body mass properties:")
+    print(f"        whole CoM world = {whole_com_w.detach().cpu().numpy().round(6)}")
+    print(f"        root link world = {root_pos_w.detach().cpu().numpy().round(6)}")
+    print(f"        whole CoM offset in root frame = "
+          f"{com_offset_root.detach().cpu().numpy().round(6)} m")
 
 def reset_robot_to_default(robot, scene):
     """초기 root/joint 상태를 쓰고 scene reset을 수행한다."""
@@ -354,31 +530,15 @@ def reset_robot_to_default(robot, scene):
     scene.reset()
     return default_q
 
-
-def build_quadrotor_allocator(m_tot, g, device):
+def build_quadrotor_allocator(m_total, g, device): # 의심스러움
     """[thrust_total, tau_x, tau_y, tau_z] -> rotor thrust 4개로 바꾸는 allocation matrix를 만든다."""
     x, y = ROTOR_XY[:, 0].clone(), ROTOR_XY[:, 1].clone()
     spins = torch.tensor([+1.0, -1.0, -1.0, +1.0])  # lb, lf, rb, rf
-    A = torch.stack([torch.ones(4), y, -x, spins * args_cli.k_drag], dim=0)
+    A = torch.stack([torch.ones(4), y, -x, spins * K_DRAG], dim=0)
     A_inv = torch.linalg.inv(A).to(device)
-    thrust_hover = m_tot * g / 4.0
+    thrust_hover = m_total * g / 4.0
     thrust_max = 3.0 * thrust_hover
     return spins, A_inv, thrust_hover, thrust_max
-
-
-def get_rotor_offsets_for_log(robot, masses, rotor_ids, m_tot, device):
-    """할당에는 쓰지 않고 로그 비교용으로만 시뮬 CoM 기준 rotor offset을 계산한다."""
-    com = (robot.data.body_com_pos_w[0] * masses.unsqueeze(-1).to(device)).sum(0) / m_tot
-    return robot.data.body_com_pos_w[0, rotor_ids] - com
-
-
-def print_startup_log(m_tot, thrust_hover, J, rotor_names, r_sim):
-    print(f"[INFO]: mass={m_tot:.3f} kg, hover/rotor={thrust_hover:.2f} N")
-    print(f"[INFO]: J diag = {torch.diagonal(J).tolist()}")
-    print(f"[INFO]: rotors={rotor_names}")
-    print(f"[INFO]: rotor xy (CAD, used):\n{ROTOR_XY.numpy().round(3)}")
-    print(f"[INFO]: rotor offsets from CoM (sim CoM, ref only):\n{r_sim.cpu().numpy().round(3)}")
-
 
 def make_smooth_reference(t, p0, num_envs, device, ramp_time):
     """takeoff ramp가 적용된 position/velocity/acceleration/yaw reference를 만든다."""
@@ -394,41 +554,74 @@ def make_smooth_reference(t, p0, num_envs, device, ramp_time):
     a_d = s * a_d
     return p_d, v_d, a_d, yaw_d
 
+def reference(t, mode, radius, period, height, N, device):
+    if mode == "hover":
+        p = torch.tensor([0.0, 0.0, height], device=device).repeat(N, 1)
+        v = torch.zeros(N, 3, device=device)
+        a = torch.zeros(N, 3, device=device)
+    else:
+        w = 2 * math.pi / period
+        c, s = math.cos(w * t), math.sin(w * t)
+        p = torch.tensor([radius * c, radius * s, height], device=device).repeat(N, 1)
+        v = torch.tensor([-radius * w * s, radius * w * c, 0.0], device=device).repeat(N, 1)
+        a = torch.tensor([-radius * w * w * c, -radius * w * w * s, 0.0], device=device).repeat(N, 1)
+    yaw = torch.zeros(N, device=device)
+    return p, v, a, yaw
 
 def compute_rotor_thrusts(ctrl, robot, p_d, v_d, a_d, yaw_d, A_inv, thrust_max, sim_dt):
     """cascade PID 출력 [thrust_total, tau]를 rotor별 thrusts로 변환한다."""
     thrust_total, tau = ctrl.compute(
         robot.data.root_pos_w, robot.data.root_quat_w,
-        robot.data.root_lin_vel_w, robot.data.root_ang_vel_b,
+        robot.data.root_link_lin_vel_w, robot.data.root_ang_vel_b,
         p_d, v_d, a_d, yaw_d, sim_dt)
 
     u = torch.cat([thrust_total.unsqueeze(-1), tau], dim=-1)    # (N, 4)
     thrusts = torch.einsum("ij,nj->ni", A_inv, u).clamp(0.0, thrust_max)
     return thrusts                                                   # (N, 4) / num_envs=1이면 (1, 4)
 
+def compute_body_wrench_and_visual_thrusts(ctrl, robot, p_d, v_d, a_d, yaw_d,
+                                           A_inv, thrust_max, sim_dt):
+    """controller wrench를 직접 적용하고, rotor thrust는 시각화/로그용으로만 만든다."""
+    thrust_total, tau = ctrl.compute(
+        robot.data.root_pos_w, robot.data.root_quat_w,
+        robot.data.root_link_lin_vel_w, robot.data.root_ang_vel_b,
+        p_d, v_d, a_d, yaw_d, sim_dt)
 
-def apply_rotor_forces(robot, thrusts, spins, rotor_ids, k_drag, device):
-    """rotor별 thrusts와 drag yaw torque를 articulation에 적용한다."""
-    num_envs = robot.num_instances
-    forces = torch.zeros(num_envs, 4, 3, device=device)
+    forces = torch.zeros(robot.num_instances, 1, 3, device=robot.device)
     torques = torch.zeros_like(forces)
-    forces[..., 2] = thrusts
-    torques[..., 2] = spins.to(device) * k_drag * thrusts
-    robot.set_external_force_and_torque(forces, torques, body_ids=rotor_ids)
+    forces[:, 0, 2] = thrust_total
+    torques[:, 0, :] = tau
 
+    u = torch.cat([thrust_total.unsqueeze(-1), tau], dim=-1)
+    thrusts = torch.einsum("ij,nj->ni", A_inv, u).clamp(0.0, thrust_max)
+    return forces, torques, thrusts
+
+def compute_cad_wrench_from_thrusts(thrusts, spins, k_drag, device):
+    """ROTOR_XY 기준 rotor thrusts를 CAD 원점 기준 body-frame wrench로 합친다."""
+    rotor_xy = ROTOR_XY.to(device=device, dtype=thrusts.dtype)
+    spins = spins.to(device=device, dtype=thrusts.dtype)
+
+    forces = torch.zeros(thrusts.shape[0], 1, 3, device=device, dtype=thrusts.dtype)
+    torques = torch.zeros_like(forces)
+    forces[:, 0, 2] = thrusts.sum(dim=-1)
+    torques[:, 0, 0] = (rotor_xy[:, 1] * thrusts).sum(dim=-1)
+    torques[:, 0, 1] = (-rotor_xy[:, 0] * thrusts).sum(dim=-1)
+    torques[:, 0, 2] = (spins * k_drag * thrusts).sum(dim=-1)
+    return forces, torques
+
+def apply_cad_wrench(robot, thrusts, spins, base_ids, k_drag, device):
+    """body-frame +z thrust와 body-frame torque를 base body에 직접 적용한다."""
+    forces, torques = compute_cad_wrench_from_thrusts(thrusts, spins, k_drag, device)
+    robot.set_external_force_and_torque(forces, torques, body_ids=base_ids)
+
+def apply_body_wrench(robot, forces, torques, body_ids):
+    """controller가 만든 body-frame +z thrust와 body-frame torque를 그대로 적용한다."""
+    robot.set_external_force_and_torque(forces, torques, body_ids=body_ids)
 
 def step_simulation(sim, scene, sim_dt):
     scene.write_data_to_sim()
     sim.step()
     scene.update(sim_dt)
-
-
-def accumulate_steady_state_error(t, ramp_time, p_d, robot, diag_err2, diag_n):
-    if t > ramp_time + 2.0:
-        diag_err2 += ((p_d - robot.data.root_pos_w)[0]) ** 2
-        diag_n += 1
-    return diag_err2, diag_n
-
 
 def quat_to_roll_pitch_deg(quat):
     w_, x_, y_, z_ = quat.tolist()
@@ -436,6 +629,30 @@ def quat_to_roll_pitch_deg(quat):
     pitch = math.degrees(math.asin(max(-1, min(1, 2 * (w_ * y_ - z_ * x_)))))
     return roll, pitch
 
+# ----------------------------------------------------------------------------
+# main loop debugging helpers
+# ----------------------------------------------------------------------------
+def print_startup_log(m_total, thrust_hover, J_base, rotor_names):
+    print(f"[INFO]: mass={m_total:.3f} kg, hover/rotor={thrust_hover:.2f} N")
+    print(f"[INFO]: J_base diag = {torch.diagonal(J_base).tolist()} kg*m^2")
+    print(f"[INFO]: rotors={rotor_names}")
+    print(f"[INFO]: rotor xy (CAD, visual/log allocation only):\n{ROTOR_XY.numpy().round(3)}")
+    print("[INFO]: control mode = direct body +z thrust and body torque on root body")
+
+def setup_ros2_debug_publisher(spins):
+    try:
+        ros_pub = Ros2CurrentPublisher(spins=spins)
+    except Exception as exc:
+        print(f"[WARN]: ROS2 debug topics disabled ({exc}).")
+        return None
+
+    print("[INFO]: ROS2 current topics:")
+    print("        /tiltrotor/current/odom")
+    print("        /tiltrotor/current/pose")
+    print("        /tiltrotor/current/path")
+    print("        /tiltrotor/current/rotor_thrusts")
+    print("        /tiltrotor/current/wrench")
+    return ros_pub
 
 def print_periodic_status(t, p_d, robot, thrusts):
     pe = (p_d - robot.data.root_pos_w)[0]
@@ -446,66 +663,51 @@ def print_periodic_status(t, p_d, robot, thrusts):
           f"thrusts[N]={thrusts_row[0]:.2f} {thrusts_row[1]:.2f} "
           f"{thrusts_row[2]:.2f} {thrusts_row[3]:.2f}")
 
-
-def should_stop_and_print_summary(t, diag_err2, diag_n, robot):
-    if args_cli.max_time <= 0.0 or t < args_cli.max_time:
-        return False
-
-    if diag_n > 0:
-        rmse = torch.sqrt(diag_err2 / diag_n)
-        z = robot.data.root_pos_w[0, 2].item()
-        print(f"[SUMMARY] steady-state RMSE (x,y,z) = "
-              f"({rmse[0]:.4f},{rmse[1]:.4f},{rmse[2]:.4f}) m | "
-              f"final z = {z:.3f} m | n = {diag_n}")
-    else:
-        print("[SUMMARY] sim ended before steady-state window")
-    return True
-
-
-def run_control_step(robot, ctrl, rotor_ids, spinner, state):
+def run_control_step(robot, ctrl, wrench_body_ids, spinner, state):
     """while 루프의 한 스텝을 기능 단위로 묶은 함수."""
     robot.set_joint_position_target(state.default_q)
 
     p_d, v_d, a_d, yaw_d = make_smooth_reference(
         state.t, state.p0, state.N, state.device, state.ramp_time)
 
-    thrusts = compute_rotor_thrusts(
+    forces, torques, thrusts = compute_body_wrench_and_visual_thrusts(
         ctrl, robot, p_d, v_d, a_d, yaw_d,
         state.A_inv, state.thrust_max, state.sim_dt)
 
-    apply_rotor_forces(
-        robot, thrusts, state.spins, rotor_ids, args_cli.k_drag, state.device)
+    apply_body_wrench(robot, forces, torques, wrench_body_ids)
 
     spinner.update(thrusts, state.spins, state.thrust_hover, state.sim_dt)
     return p_d, thrusts
 
-
+# ----------------------------------------------------------------------------
+# main loop
+# ----------------------------------------------------------------------------
 def main():
     # 시작시 설정
     sim, scene, spinner, robot = setup_sim_scene_and_robot()
     device = robot.device #계산 디바이스 (CPU or GPU)
     robot_num = robot.num_instances # 로봇 대수, 1
 
-    rotor_ids, rotor_names = find_robot_handles(robot)
-    masses, m_tot, g, J = compute_whole_body_inertia(robot, device)
+    wrench_body_ids, rotor_names = find_robot_handles(robot)
+    m_total, g, J_base = get_mass_and_base_inertia(robot, device)
     default_q = reset_robot_to_default(robot, scene)
+    print_wrench_body_com_debug(robot, wrench_body_ids)
+    print_whole_body_com_debug(robot)
 
-    spins, A_inv, thrust_hover, thrust_max = build_quadrotor_allocator(m_tot, g, device)
-    r_sim = get_rotor_offsets_for_log(robot, masses, rotor_ids, m_tot, device)
+    spins, A_inv, thrust_hover, thrust_max = build_quadrotor_allocator(m_total, g, device)
 
-    ctrl = DronePID(robot_num, m_tot, g, J, device)
+    ctrl = DronePID(robot_num, m_total, g, J_base, device)
 
     ramp_time = 4.0
     p0 = robot.data.root_pos_w.clone()
     sim_dt = sim.get_physics_dt()
 
-    print_startup_log(m_tot, thrust_hover, J, rotor_names, r_sim)
+    print_startup_log(m_total, thrust_hover, J_base, rotor_names)
+    ros_pub = setup_ros2_debug_publisher(spins)
 
     state = ControlLoopState(
         t=0.0,
         count=0,
-        diag_err2=torch.zeros(3, device=device),
-        diag_n=0,
         device=device,
         N=robot_num,
         default_q=default_q,
@@ -518,22 +720,28 @@ def main():
         sim_dt=sim_dt,
     )
 
+    if ros_pub is not None:
+        ros_pub.publish(robot, torch.zeros(robot_num, 4, device=device))
+        ros_pub.print_local_topics()
+
     # 루프
-    while simulation_app.is_running():
-        p_d, thrusts = run_control_step(robot, ctrl, rotor_ids, spinner, state)
+    try:
+        while simulation_app.is_running():
+            p_d, thrusts = run_control_step(
+                robot, ctrl, wrench_body_ids, spinner, state)
 
-        step_simulation(sim, scene, sim_dt)
-        state.t += sim_dt
-        state.count += 1
+            step_simulation(sim, scene, sim_dt)
+            state.t += sim_dt
+            state.count += 1
 
-        state.diag_err2, state.diag_n = accumulate_steady_state_error(
-            state.t, ramp_time, p_d, robot, state.diag_err2, state.diag_n)
+            if ros_pub is not None:
+                ros_pub.publish(robot, thrusts)
 
-        if state.count % 200 == 0:
-            print_periodic_status(state.t, p_d, robot, thrusts)
-
-        if should_stop_and_print_summary(state.t, state.diag_err2, state.diag_n, robot):
-            break
+            if state.count % 200 == 0:
+                print_periodic_status(state.t, p_d, robot, thrusts)
+    finally:
+        if ros_pub is not None:
+            ros_pub.shutdown()
 
 
 if __name__ == "__main__":
