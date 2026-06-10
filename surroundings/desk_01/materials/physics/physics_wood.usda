@@ -1,0 +1,17 @@
+#usda 1.0
+(
+    defaultPrim = "Wood"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Material "Wood" (
+    prepend apiSchemas = ["PhysicsMaterialAPI"]
+)
+{
+    float physics:density = 1500
+    float physics:dynamicFriction = 0.75
+    float physics:restitution = 0.3
+    float physics:staticFriction = 0.75
+}
+
