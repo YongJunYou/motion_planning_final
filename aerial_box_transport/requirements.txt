@@ -1,0 +1,9 @@
+# Planner half, installed into the am_dualarm conda env via conda-forge.
+# Listed here for reference and reproducibility.
+casadi
+pinocchio        # provides pinocchio.casadi (cpin) for M1
+numpy
+scipy
+matplotlib
+pyyaml
+pytest

@@ -1,0 +1,1264 @@
+{
+  "usd_path": "/home/jaewoo/Research/motion_planning_final/dual_arm_final.usd",
+  "articulation_roots": [
+    "/Root/main_v10/main_v10/base_link_01"
+  ],
+  "base_candidates": [
+    "/Root/main_v10/main_v10/lb_link2_01",
+    "/Root/main_v10/main_v10/lf_link2_01",
+    "/Root/main_v10/main_v10/rb_link2_01",
+    "/Root/main_v10/main_v10/rf_link2_01",
+    "/Root/main_v10/main_v10/l_link4_01",
+    "/Root/main_v10/main_v10/r_link4_01"
+  ],
+  "bodies": [
+    {
+      "name": "base_link_01",
+      "path": "/Root/main_v10/main_v10/base_link_01",
+      "mass": 2.111999988555908,
+      "com": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "lb_link1_01",
+      "path": "/Root/main_v10/main_v10/lb_link1_01",
+      "mass": 0.2648000121116638,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "lb_link2_01",
+      "path": "/Root/main_v10/main_v10/lb_link2_01",
+      "mass": 0.1242000013589859,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "lf_link1_01",
+      "path": "/Root/main_v10/main_v10/lf_link1_01",
+      "mass": 0.26910001039505005,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "lf_link2_01",
+      "path": "/Root/main_v10/main_v10/lf_link2_01",
+      "mass": 0.1242000013589859,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "rb_link1_01",
+      "path": "/Root/main_v10/main_v10/rb_link1_01",
+      "mass": 0.2648000121116638,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "rb_link2_01",
+      "path": "/Root/main_v10/main_v10/rb_link2_01",
+      "mass": 0.1242000013589859,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "rf_link1_01",
+      "path": "/Root/main_v10/main_v10/rf_link1_01",
+      "mass": 0.26910001039505005,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "rf_link2_01",
+      "path": "/Root/main_v10/main_v10/rf_link2_01",
+      "mass": 0.1242000013589859,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "l_link4_01",
+      "path": "/Root/main_v10/main_v10/l_link4_01",
+      "mass": 0.05180000141263008,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "l_link3_01",
+      "path": "/Root/main_v10/main_v10/l_link3_01",
+      "mass": 0.2071000039577484,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "l_link2_01",
+      "path": "/Root/main_v10/main_v10/l_link2_01",
+      "mass": 0.2232999950647354,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "l_link1_01",
+      "path": "/Root/main_v10/main_v10/l_link1_01",
+      "mass": 0.11079999804496765,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "r_link4_01",
+      "path": "/Root/main_v10/main_v10/r_link4_01",
+      "mass": 0.05180000141263008,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "r_link3_01",
+      "path": "/Root/main_v10/main_v10/r_link3_01",
+      "mass": 0.2071000039577484,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "r_link2_01",
+      "path": "/Root/main_v10/main_v10/r_link2_01",
+      "mass": 0.2232999950647354,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "name": "r_link1_01",
+      "path": "/Root/main_v10/main_v10/r_link1_01",
+      "mass": 0.11079999804496765,
+      "com": [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ],
+      "diag_inertia": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "principal_axes": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_t": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "world_R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    }
+  ],
+  "joints": [
+    {
+      "name": "dof_lb1",
+      "path": "/Root/main_v10/main_v10/dof_lb1",
+      "kind": "tilt",
+      "axis": "Z",
+      "lower_deg": -Infinity,
+      "upper_deg": Infinity,
+      "body0": "/Root/main_v10/main_v10/lb_link1_01",
+      "body1": "/Root/main_v10/main_v10/base_link_01",
+      "local_pos0": [
+        -0.023000000044703484,
+        0.18000000715255737,
+        1.8803363805437018e-17
+      ],
+      "local_rot0": [
+        0.5,
+        -0.5,
+        0.5,
+        -0.5
+      ],
+      "local_pos1": [
+        -0.023000000044703484,
+        0.18000000715255737,
+        1.8803363805437018e-17
+      ],
+      "local_rot1": [
+        0.5,
+        -0.5,
+        0.5,
+        -0.5
+      ]
+    },
+    {
+      "name": "dof_lb2",
+      "path": "/Root/main_v10/main_v10/dof_lb2",
+      "kind": "tilt",
+      "axis": "Z",
+      "lower_deg": -Infinity,
+      "upper_deg": Infinity,
+      "body0": "/Root/main_v10/main_v10/lb_link2_01",
+      "body1": "/Root/main_v10/main_v10/lb_link1_01",
+      "local_pos0": [
+        -0.18000000715255737,
+        0.2840999960899353,
+        -6.730205975857828e-11
+      ],
+      "local_rot0": [
+        0.7071067690849304,
+        -0.7071067690849304,
+        -1.296823643090883e-33,
+        8.821173176444419e-34
+      ],
+      "local_pos1": [
+        -0.18000000715255737,
+        0.2840999960899353,
+        -6.730205975857828e-11
+      ],
+      "local_rot1": [
+        0.7071067690849304,
+        -0.7071067690849304,
+        -1.296823643090883e-33,
+        8.821173176444419e-34
+      ]
+    },
+    {
+      "name": "dof_lf1",
+      "path": "/Root/main_v10/main_v10/dof_lf1",
+      "kind": "tilt",
+      "axis": "Z",
+      "lower_deg": -Infinity,
+      "upper_deg": Infinity,
+      "body0": "/Root/main_v10/main_v10/lf_link1_01",
+      "body1": "/Root/main_v10/main_v10/base_link_01",
+      "local_pos0": [
+        -0.023000000044703484,
+        -0.18000000715255737,
+        -4.562807337309061e-17
+      ],
+      "local_rot0": [
+        -0.5,
+        0.5,
+        -0.5,
+        0.5
+      ],
+      "local_pos1": [
+        -0.023000000044703484,
+        -0.18000000715255737,
+        -4.562807337309061e-17
+      ],
+      "local_rot1": [
+        -0.5,
+        0.5,
+        -0.5,
+        0.5
+      ]
+    },
+    {
+      "name": "dof_lf2",
+      "path": "/Root/main_v10/main_v10/dof_lf2",
+      "kind": "tilt",
+      "axis": "Z",
+      "lower_deg": -Infinity,
+      "upper_deg": Infinity,
+      "body0": "/Root/main_v10/main_v10/lf_link2_01",
+      "body1": "/Root/main_v10/main_v10/lf_link1_01",
+      "local_pos0": [
+        -0.18000000715255737,
+        -0.07590000331401825,
+        -8.008680524307366e-11
+      ],
+      "local_rot0": [
+        -0.7071067690849304,
+        0.7071067690849304,
+        3.753723373493682e-25,
+        3.059326836039656e-25
+      ],
+      "local_pos1": [
+        -0.18000000715255737,
+        -0.07590000331401825,
+        -8.008680524307366e-11
+      ],
+      "local_rot1": [
+        -0.7071067690849304,
+        0.7071067690849304,
+        3.753723373493682e-25,
+        3.059326836039656e-25
+      ]
+    },
+    {
+      "name": "dof_rb1",
+      "path": "/Root/main_v10/main_v10/dof_rb1",
+      "kind": "tilt",
+      "axis": "Z",
+      "lower_deg": -Infinity,
+      "upper_deg": Infinity,
+      "body0": "/Root/main_v10/main_v10/rb_link1_01",
+      "body1": "/Root/main_v10/main_v10/base_link_01",
+      "local_pos0": [
+        0.3138999938964844,
+        0.18000629544258118,
+        -3.679192492900725e-17
+      ],
+      "local_rot0": [
+        -0.5,
+        0.5,
+        -0.5,
+        0.5
+      ],
+      "local_pos1": [
+        0.3138999938964844,
+        0.18000629544258118,
+        -3.679192492900725e-17
+      ],
+      "local_rot1": [
+        -0.5,
+        0.5,
+        -0.5,
+        0.5
+      ]
+    },
+    {
+      "name": "dof_rb2",
+      "path": "/Root/main_v10/main_v10/dof_rb2",
+      "kind": "tilt",
+      "axis": "Z",
+      "lower_deg": -Infinity,
+      "upper_deg": Infinity,
+      "body0": "/Root/main_v10/main_v10/rb_link2_01",
+      "body1": "/Root/main_v10/main_v10/rb_link1_01",
+      "local_pos0": [
+        0.18000000715255737,
+        0.2841063141822815,
+        2.151463686025923e-17
+      ],
+      "local_rot0": [
+        -0.7071067690849304,
+        0.7071067690849304,
+        -6.783049767779788e-17,
+        -6.783049767779788e-17
+      ],
+      "local_pos1": [
+        0.18000000715255737,
+        0.2841063141822815,
+        2.151463686025923e-17
+      ],
+      "local_rot1": [
+        -0.7071067690849304,
+        0.7071067690849304,
+        -6.783049767779788e-17,
+        -6.783049767779788e-17
+      ]
+    },
+    {
+      "name": "dof_rf1",
+      "path": "/Root/main_v10/main_v10/dof_rf1",
+      "kind": "tilt",
+      "axis": "Z",
+      "lower_deg": -Infinity,
+      "upper_deg": Infinity,
+      "body0": "/Root/main_v10/main_v10/rf_link1_01",
+      "body1": "/Root/main_v10/main_v10/base_link_01",
+      "local_pos0": [
+        0.3138999938964844,
+        -0.18000000715255737,
+        -3.469446951953614e-18
+      ],
+      "local_rot0": [
+        0.5,
+        -0.5,
+        0.5,
+        -0.5
+      ],
+      "local_pos1": [
+        0.3138999938964844,
+        -0.18000000715255737,
+        -3.469446951953614e-18
+      ],
+      "local_rot1": [
+        0.5,
+        -0.5,
+        0.5,
+        -0.5
+      ]
+    },
+    {
+      "name": "dof_rf2",
+      "path": "/Root/main_v10/main_v10/dof_rf2",
+      "kind": "tilt",
+      "axis": "Z",
+      "lower_deg": -Infinity,
+      "upper_deg": Infinity,
+      "body0": "/Root/main_v10/main_v10/rf_link2_01",
+      "body1": "/Root/main_v10/main_v10/rf_link1_01",
+      "local_pos0": [
+        0.18000000715255737,
+        -0.07589999586343765,
+        -2.622414004699314e-18
+      ],
+      "local_rot0": [
+        6.123234262925839e-17,
+        4.065980162097051e-17,
+        0.7071067690849304,
+        0.7071067690849304
+      ],
+      "local_pos1": [
+        0.18000000715255737,
+        -0.07589999586343765,
+        -2.622414004699314e-18
+      ],
+      "local_rot1": [
+        6.123234262925839e-17,
+        4.065980162097051e-17,
+        0.7071067690849304,
+        0.7071067690849304
+      ]
+    },
+    {
+      "name": "dof_l1",
+      "path": "/Root/main_v10/main_v10/dof_l1",
+      "kind": "arm",
+      "axis": "Z",
+      "lower_deg": -Infinity,
+      "upper_deg": Infinity,
+      "body0": "/Root/main_v10/main_v10/l_link1_01",
+      "body1": "/Root/main_v10/main_v10/base_link_01",
+      "local_pos0": [
+        -0.3634999990463257,
+        -2.582309376926987e-16,
+        -2.474610477716195e-18
+      ],
+      "local_rot0": [
+        0.5,
+        0.5,
+        -0.5,
+        -0.5
+      ],
+      "local_pos1": [
+        -0.3634999990463257,
+        -2.582309376926987e-16,
+        -2.474610477716195e-18
+      ],
+      "local_rot1": [
+        0.5,
+        0.5,
+        -0.5,
+        -0.5
+      ]
+    },
+    {
+      "name": "dof_l2",
+      "path": "/Root/main_v10/main_v10/dof_l2",
+      "kind": "arm",
+      "axis": "Z",
+      "lower_deg": 0.0,
+      "upper_deg": 180.0,
+      "body0": "/Root/main_v10/main_v10/l_link2_01",
+      "body1": "/Root/main_v10/main_v10/l_link1_01",
+      "local_pos0": [
+        -0.41499999165534973,
+        6.661338147750939e-16,
+        -0.02449999935925007
+      ],
+      "local_rot0": [
+        1.1385507709966557e-14,
+        -0.7071068286895752,
+        0.7071068286895752,
+        1.3916968163822652e-14
+      ],
+      "local_pos1": [
+        -0.41499999165534973,
+        6.661338147750939e-16,
+        -0.02449999935925007
+      ],
+      "local_rot1": [
+        1.1385507709966557e-14,
+        -0.7071068286895752,
+        0.7071068286895752,
+        1.3916968163822652e-14
+      ]
+    },
+    {
+      "name": "dof_l3",
+      "path": "/Root/main_v10/main_v10/dof_l3",
+      "kind": "arm",
+      "axis": "Z",
+      "lower_deg": 0.0,
+      "upper_deg": 180.0,
+      "body0": "/Root/main_v10/main_v10/l_link3_01",
+      "body1": "/Root/main_v10/main_v10/l_link2_01",
+      "local_pos0": [
+        -0.4754500091075897,
+        0.38324999809265137,
+        0.02449999935925007
+      ],
+      "local_rot0": [
+        -1.0,
+        -6.600105712477452e-15,
+        0.0,
+        -4.190823558986625e-31
+      ],
+      "local_pos1": [
+        -0.4754500091075897,
+        0.38324999809265137,
+        0.02449999935925007
+      ],
+      "local_rot1": [
+        -1.0,
+        -6.600105712477452e-15,
+        0.0,
+        -4.190823558986625e-31
+      ]
+    },
+    {
+      "name": "dof_l4",
+      "path": "/Root/main_v10/main_v10/dof_l4",
+      "kind": "arm",
+      "axis": "Z",
+      "lower_deg": 0.0,
+      "upper_deg": 180.0,
+      "body0": "/Root/main_v10/main_v10/l_link4_01",
+      "body1": "/Root/main_v10/main_v10/l_link3_01",
+      "local_pos0": [
+        -0.4754500091075897,
+        -0.06700000166893005,
+        0.01899999938905239
+      ],
+      "local_rot0": [
+        -1.0,
+        -1.9922782431495804e-14,
+        7.296783852967891e-17,
+        2.5566354085051122e-28
+      ],
+      "local_pos1": [
+        -0.4754500091075897,
+        -0.06700000166893005,
+        0.01899999938905239
+      ],
+      "local_rot1": [
+        -1.0,
+        -1.9922782431495804e-14,
+        7.296783852967891e-17,
+        2.5566354085051122e-28
+      ]
+    },
+    {
+      "name": "dof_r1",
+      "path": "/Root/main_v10/main_v10/dof_r1",
+      "kind": "arm",
+      "axis": "Z",
+      "lower_deg": -Infinity,
+      "upper_deg": Infinity,
+      "body0": "/Root/main_v10/main_v10/r_link1_01",
+      "body1": "/Root/main_v10/main_v10/base_link_01",
+      "local_pos0": [
+        0.3634999990463257,
+        -2.582309376926987e-16,
+        -3.247402310632636e-18
+      ],
+      "local_rot0": [
+        0.5,
+        -0.5,
+        0.5,
+        -0.5
+      ],
+      "local_pos1": [
+        0.3634999990463257,
+        -2.582309376926987e-16,
+        -3.247402310632636e-18
+      ],
+      "local_rot1": [
+        0.5,
+        -0.5,
+        0.5,
+        -0.5
+      ]
+    },
+    {
+      "name": "dof_r2",
+      "path": "/Root/main_v10/main_v10/dof_r2",
+      "kind": "arm",
+      "axis": "Z",
+      "lower_deg": 0.0,
+      "upper_deg": 180.0,
+      "body0": "/Root/main_v10/main_v10/r_link2_01",
+      "body1": "/Root/main_v10/main_v10/r_link1_01",
+      "local_pos0": [
+        0.41499999165534973,
+        -4.440892098500626e-16,
+        0.02449999935925007
+      ],
+      "local_rot0": [
+        0.7071068286895752,
+        6.123234924670329e-17,
+        -1.5700925641616852e-16,
+        -0.7071068286895752
+      ],
+      "local_pos1": [
+        0.41499999165534973,
+        -4.440892098500626e-16,
+        0.02449999935925007
+      ],
+      "local_rot1": [
+        0.7071068286895752,
+        6.123234924670329e-17,
+        -1.5700925641616852e-16,
+        -0.7071068286895752
+      ]
+    },
+    {
+      "name": "dof_r3",
+      "path": "/Root/main_v10/main_v10/dof_r3",
+      "kind": "arm",
+      "axis": "Z",
+      "lower_deg": 0.0,
+      "upper_deg": 180.0,
+      "body0": "/Root/main_v10/main_v10/r_link3_01",
+      "body1": "/Root/main_v10/main_v10/r_link2_01",
+      "local_pos0": [
+        0.4754500091075897,
+        0.38324999809265137,
+        -0.02449999935925007
+      ],
+      "local_rot0": [
+        0.0,
+        6.123234262925839e-17,
+        1.0,
+        1.232595164407831e-32
+      ],
+      "local_pos1": [
+        0.4754500091075897,
+        0.38324999809265137,
+        -0.02449999935925007
+      ],
+      "local_rot1": [
+        0.0,
+        6.123234262925839e-17,
+        1.0,
+        1.232595164407831e-32
+      ]
+    },
+    {
+      "name": "dof_r4",
+      "path": "/Root/main_v10/main_v10/dof_r4",
+      "kind": "arm",
+      "axis": "Z",
+      "lower_deg": 0.0,
+      "upper_deg": 180.0,
+      "body0": "/Root/main_v10/main_v10/r_link4_01",
+      "body1": "/Root/main_v10/main_v10/r_link3_01",
+      "local_pos0": [
+        0.4754500091075897,
+        -0.06700000166893005,
+        -0.01899999938905239
+      ],
+      "local_rot0": [
+        -2.3592239273284576e-16,
+        6.123234262925839e-17,
+        1.0,
+        4.371503159461554e-16
+      ],
+      "local_pos1": [
+        0.4754500091075897,
+        -0.06700000166893005,
+        -0.01899999938905239
+      ],
+      "local_rot1": [
+        -2.3592239273284576e-16,
+        6.123234262925839e-17,
+        1.0,
+        4.371503159461554e-16
+      ]
+    }
+  ],
+  "n_arm_joints": 8,
+  "n_tilt_joints": 8,
+  "total_mass": 4.862600035965443
+}

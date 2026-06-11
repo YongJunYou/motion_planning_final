@@ -1,0 +1,21 @@
+# Robot-side parameters (spec section 11: robot.yaml holds k, eps, mu, margins, model source).
+
+# M2 smooth contact model and friction.
+contact:
+  k: 1700.0        # contact stiffness [N/m]. ~5 N at ~3 mm penetration.
+  eps: 1.0e-4      # smoothing parameter [m]. k*eps/2 ~ 0.085 N, well below operating force.
+  mu: 0.7          # pad-on-cardboard friction (teammate's physics_cardboard.usda: static/dynamic 0.7).
+  n_contacts: 2    # two opposing end-effectors squeeze the box.
+
+# Squeeze-force policy parameters (M5 and the fixed-force baseline).
+squeeze:
+  margin: 0.5      # safety buffer added to the slip-aware setpoint [N].
+  floor: 2.0       # minimum squeeze, keeps contact alive at low acceleration [N].
+  fixed_force: 5.0 # constant squeeze for the fixed-force baseline [N].
+
+# Full whole-body model source for M1 (Step 3). The MVP does not use this.
+# Robot model comes ONLY from this USD (the vlm_drone_ws hardware is different).
+model:
+  usd_path: /home/jaewoo/Research/motion_planning_final/dual_arm_final.usd
+  n_arms: 2
+  arm_dof: 4
