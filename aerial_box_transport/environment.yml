@@ -1,0 +1,25 @@
+# am_dualarm: planner conda env (Pinocchio + cpin, CasADi, IPOPT).
+# Recreate it with:
+#   conda env create -f environment.yml
+#   conda activate am_dualarm
+#
+# This is the PLANNER env (src/planner/ocp.py, tests, experiments), NOT the IsaacSim
+# simulator. The IsaacSim demo (src/sim/track_reference.py) needs a separate IsaacSim
+# 5.1 / IsaacLab install (NVIDIA's own pip-wheel process; not reproducible from a conda
+# environment file). See the README "환경" section.
+name: am_dualarm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pinocchio=4.0.0      # provides pinocchio.casadi (cpin) for the whole-body model
+  - casadi=3.7.2
+  - ipopt=3.14.19
+  - numpy
+  - scipy
+  - matplotlib
+  - pyyaml
+  - pytest
+  - pip
+  - pip:
+      - usd-core==26.5   # USD parsing for src/model/extract_usd.py (planner side)

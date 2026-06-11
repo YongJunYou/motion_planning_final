@@ -41,9 +41,20 @@
 - `results/`       생성 산출물(궤적 npz, 그림). git에는 포함되지 않음(재생성 가능)
 
 ## 환경 (conda 2개)
-- **`am_dualarm`**: 플래너용. Pinocchio(+pinocchio.casadi), CasADi, IPOPT, numpy,
-  scipy, matplotlib, pyyaml, pytest. OCP를 풀어 레퍼런스 궤적을 생성
-- **`am_isaac`**: 시뮬레이션용. IsaacSim 5.1 / IsaacLab. 생성된 궤적을 GUI에서 재생
+환경 자체(설치된 패키지 폴더)는 git에 올리지 않습니다(수 GB, 플랫폼 의존 바이너리).
+아래처럼 명세로부터 재생성하세요.
+
+- **`am_dualarm`** (플래너): Pinocchio(+pinocchio.casadi/cpin), CasADi, IPOPT, numpy,
+  scipy, matplotlib, pyyaml, pytest, usd-core. OCP를 풀어 레퍼런스 궤적을 생성.
+  `environment.yml`로 재생성:
+  ```
+  conda env create -f environment.yml
+  conda activate am_dualarm
+  ```
+- **`am_isaac`** (시뮬레이션): IsaacSim 5.1.0 / IsaacLab 0.54.3. NVIDIA 공식 절차로
+  **별도 설치**합니다(pip wheel 기반, 수 GB라 environment.yml로 재생성하지 않음). 이
+  IsaacSim 씬을 만든 환경과 동일한 IsaacSim/IsaacLab을 쓰면 됩니다. 설치는 NVIDIA
+  Isaac Sim / Isaac Lab 공식 문서를 참고하세요.
 
 ## IsaacSim 시뮬레이션 실행 (반복 재생 데모)
 `aerial_box_transport/` 디렉토리에서 두 단계로 실행합니다.
