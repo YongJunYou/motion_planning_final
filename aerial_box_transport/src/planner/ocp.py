@@ -73,6 +73,12 @@ def solve_ocp(verbose=False):
     # base_grasp (approach), grasps, then carries the box to `place`.
     pl0, pr0 = wb.fk_ee(np.concatenate([[0, 0, 0], [0, 0, 0, 1], arm_grasp]))  # quat xyzw
     r_off = 0.5 * (np.array(pl0).ravel() + np.array(pr0).ravel())
+    # The box-under-base alignment cost holds the base directly OVER the box, so the base
+    # guide/seed should use ZERO forward (y) offset. Keeping arm_grasp's forward reach here
+    # made base_ref swing out in y (0 -> 0.33 -> 0); the controller then lagged ~5 cm at the
+    # grasp and the gripper closed just OFF the (small) box. Zero it so the base flies in
+    # straight (the actual arm reach-down is still discovered, pads pinned to the box).
+    r_off[1] = 0.0
     pick = np.asarray(o["pick"], float)
     place = np.asarray(o["place"], float)
     home = np.zeros(3)
@@ -156,6 +162,18 @@ def solve_ocp(verbose=False):
         return [p[2] + 1.5 * (1 - od) - (desk_surf + clr),    # base >= desk top + clr
                 p[2] + 1.5 * (1 - orr) - (rack_surf + clr)]   # base >= rack shelf + clr
 
+    # EE pads must not dive INTO the desk/rack surface on the (near-vertical) descent to the
+    # box. Model each pad as a small sphere (radius r_ee) and keep it above the surface over
+    # the footprints. r_ee MUST be < the box half-height above the surface (0.057 m) so the
+    # pad can still reach the box face at grip height. Same smooth-indicator + big-M form.
+    r_ee = o.get("ee_radius", 0.04)
+
+    def ee_clear(p):
+        od = sind(p[0], desk_fp[0], desk_fp[1]) * sind(p[1], desk_fp[2], desk_fp[3])
+        orr = sind(p[0], rack_fp[0], rack_fp[1]) * sind(p[1], rack_fp[2], rack_fp[3])
+        return [p[2] + 1.5 * (1 - od) - (desk_surf + r_ee),    # pad sphere >= desk top
+                p[2] + 1.5 * (1 - orr) - (rack_surf + r_ee)]   # pad sphere >= rack shelf
+
     # base reference path (guide + soft target). APPROACH is over-then-DOWN: home (the
     # spawn) is already ABOVE the box, so no climb is needed; just traverse at the start
     # height to directly OVER the grasp hover, then descend VERTICALLY onto the box. The
@@ -214,6 +232,7 @@ def solve_ocp(verbose=False):
     arm_hi = np.array([1e3, np.pi, np.pi, np.pi, 1e3, np.pi, np.pi, np.pi])
     w_base, w_f, w_box, w_hold = 50.0, 1.0, 200.0, 2.0
     w_reg_a, w_reg_v, w_sym, w_att = 1e-3, 1e-2, 2.0, 30.0
+    w_align = 50.0    # box-under-base: penalize the horizontal box<->base offset (CoM keep)
 
     opti.subject_to(QR[0] == np.concatenate([home, [0, 0, 0], arm_start]))  # arm level, not down
     opti.subject_to(VR[0] == np.zeros(14))
@@ -231,7 +250,7 @@ def solve_ocp(verbose=False):
         if ph in ("approach", "grasp"):
             opti.subject_to(PB[k] == pick)                        # rests on the pick-up support
         elif ph == "transport":
-            opti.subject_to(PB[k] == 0.5 * (pl + pr))             # carried at the EE midpoint
+            opti.subject_to(PB[k][0] == 0.5 * (pl[0] + pr[0]))    # box x at the EE midpoint
             opti.subject_to(lam_l >= fn_set[k])                   # slip-aware: enough squeeze to hold
             opti.subject_to(lam_r >= fn_set[k])
             for c in keep_out(PB[k]):                             # the box avoids desk/rack
@@ -241,6 +260,17 @@ def solve_ocp(verbose=False):
         elif ph == "release":
             opti.subject_to(PB[k] == place)                       # placed on the shelf
 
+        # GRASP DEFINITION (whole-body): the task gives WHERE each pad must be -- the centre
+        # of the box's left / right face. Pin each pad's y,z to the box face centre (PB.y,
+        # PB.z) in every gripping phase; the squeeze (lambda) presses them into the +-x faces.
+        # So the OCP DISCOVERS the base + arm that reach these two pad targets, instead of
+        # tracking a precomputed base_grasp / arm_grasp pose. (Box y,z then follow the pads.)
+        if ph in ("grasp", "transport", "release"):
+            opti.subject_to(pl[1] == PB[k][1])                    # left pad at box face y
+            opti.subject_to(pl[2] == PB[k][2])                    # left pad at box face z
+            opti.subject_to(pr[1] == PB[k][1])                    # right pad at box face y
+            opti.subject_to(pr[2] == PB[k][2])                    # right pad at box face z
+
         opti.subject_to(opti.bounded(arm_lo, QR[k][6:14], arm_hi))
         # keep the gripper jaws PARALLEL (pad faces along world x) at every step, so
         # closing from pre-grasp to grasp is a pure squeeze (only the gap shrinks, the
@@ -248,43 +278,65 @@ def solve_ocp(verbose=False):
         # per arm, which is 0 at BOTH arm_pre and arm_grasp; hold it at 0 throughout.
         # k = 0 is already pinned by the initial condition, so skip it (no redundant row).
         if k >= 1:
-            opti.subject_to(QR[k][7] - QR[k][8] - QR[k][9] == 0.0)     # left jaw parallel
-            opti.subject_to(QR[k][11] - QR[k][12] - QR[k][13] == 0.0)  # right jaw parallel
+            # L/R arm SYMMETRY (the two arms are mirror images): without it the optimizer can
+            # pick an asymmetric pose during the open approach (left pad in front of the box,
+            # right pad behind) that still satisfies the midpoint-over-box pin. Force the mirror.
+            opti.subject_to(QR[k][6] + QR[k][10] == 0.0)   # dof1_l = -dof1_r
+            opti.subject_to(QR[k][7] == QR[k][11])         # dof2_l = dof2_r
+            opti.subject_to(QR[k][8] == QR[k][12])         # dof3_l = dof3_r
+            opti.subject_to(QR[k][9] == QR[k][13])         # dof4_l = dof4_r
+            # parallel jaws (pad faces along world x); the right arm follows by symmetry.
+            opti.subject_to(QR[k][7] - QR[k][8] - QR[k][9] == 0.0)
         opti.subject_to(opti.bounded(-3.0, VR[k], 3.0))
         opti.subject_to(opti.bounded(-25.0, AR[k], 25.0))
         for c in base_clear(QR[k][0:3]):                      # base stays clr above surfaces
             opti.subject_to(c >= 0)
+        for c in ee_clear(pl) + ee_clear(pr):                 # gripper pads stay above surfaces
+            opti.subject_to(c >= 0)
 
         if ph == "approach":
-            cost += w_base * ca.sumsqr(QR[k][0:3] - base_ref[k])  # fly home -> over box -> down
-            # Hold the gripper OPEN (dof2-4 at the wide pre-grasp gap) but do NOT prescribe the
-            # arm-lowering: dof1 is left FREE. The base is held high by base_clear and the grasp
-            # needs the pads ON the box at the surface, so reaching DOWN is the only way to grasp
-            # -> the optimizer DISCOVERS dof1 lowering on its own (we fix only the level start,
-            # arm_start at k = 0). Only dof2-4 are tracked here, so dof1 stays free.
+            # Hold the gripper OPEN (dof2-4 at the wide pre-grasp gap) but leave dof1 FREE
+            # (arm-lowering is discovered, not prescribed).
             cost += w_hold * (ca.sumsqr(QR[k][7:10] - arm_pre[1:4])     # left jaw stays open
                               + ca.sumsqr(QR[k][11:14] - arm_pre[5:8]))  # right jaw stays open
-            if k in ap_descend:                                   # final approach: straight DOWN
-                opti.subject_to(QR[k][0] == base_grasp[0])        # lock x over the box
-                opti.subject_to(QR[k][1] == base_grasp[1])        # lock y over the box (no sweep)
+            if k in ap_descend:
+                # final approach: descend in z (base_ref guide) only; the box-under-base
+                # alignment cost (below) brings the base OVER the box.
+                cost += w_base * (QR[k][2] - base_ref[k][2]) ** 2
+                # Keep the OPEN gripper centred OVER the box (its pad MIDPOINT at the box x,y)
+                # as it descends, so the wide-open pads straddle the box and the close is a
+                # pure x-squeeze. Without this the open arm is still reaching FORWARD (dof1 not
+                # yet pi/2), so the pads sit in front of the box and SWEEP into it on closing
+                # (pushing it away). This forces the arm to fold straight down before the grasp.
+                opti.subject_to(0.5 * (pl[0] + pr[0]) == PB[k][0])    # pad midpoint over box x
+                opti.subject_to(0.5 * (pl[1] + pr[1]) == PB[k][1])    # pad midpoint over box y
+            else:
+                cost += w_base * ca.sumsqr(QR[k][0:3] - base_ref[k])  # fly home -> over the box
         elif ph == "grasp":
-            cost += w_base * ca.sumsqr(QR[k][0:3] - base_grasp)   # hold the grasp hover
+            # base + arm are DISCOVERED to reach the pinned pad targets (above); no
+            # base_grasp / arm_grasp tracking. Squeeze presses the pads into the +-x faces.
             cost += w_f * ((lam_l - o["squeeze_grasp"]) ** 2 + (lam_r - o["squeeze_grasp"]) ** 2)
             cost += w_sym * (lam_l - lam_r) ** 2
-            cost += w_hold * ca.sumsqr(QR[k][6:14] - arm_grasp)
         elif ph == "transport":
-            # gentle up-and-over GUIDE (time-paced, so the descent is trackable); the
-            # hard keep-out constraints below still GUARANTEE the box/drone clear the rack.
+            # gentle up-and-over GUIDE for the box (time-paced, so the descent is trackable);
+            # the hard keep-out constraints above still GUARANTEE the box/drone clear the rack.
             cost += w_box * ca.sumsqr(PB[k] - box_guess[k])
             # hold a FIRM squeeze while carrying (so the sim friction grip holds); the
             # slip-aware value stays enforced as the lower bound (lam >= fn_set above).
             cost += w_f * ((lam_l - o["squeeze_grasp"]) ** 2 + (lam_r - o["squeeze_grasp"]) ** 2)
             cost += w_sym * (lam_l - lam_r) ** 2
-            cost += w_hold * ca.sumsqr(QR[k][6:14] - arm_grasp)
+            # arm DISCOVERED (pads pinned to the carried box above); no arm_grasp tracking.
         elif ph == "release":
-            cost += w_base * ca.sumsqr(QR[k][0:3] - base_place)   # hold at the drop hover
+            # base + arm DISCOVERED to hold the pads at the placed box; squeeze relaxed.
             cost += w_f * ((lam_l - sq["floor"]) ** 2 + (lam_r - sq["floor"]) ** 2)
-            cost += w_hold * ca.sumsqr(QR[k][6:14] - arm_grasp)
+
+        # BOX-UNDER-BASE alignment (soft): keep the carried object's centre on the vertical
+        # line (global z) through the base centre, so the load barely shifts the whole-body
+        # CoM and applies little disturbance torque on the (omnidirectional) base. NOT given
+        # as a guide/waypoint -- the optimizer DISCOVERS the straight-down pick / carry from
+        # this penalty on the horizontal box<->base offset, traded off against base_clear.
+        if (ph in ("grasp", "transport", "release")) or (k in ap_descend):
+            cost += w_align * ((PB[k][0] - QR[k][0]) ** 2 + (PB[k][1] - QR[k][1]) ** 2)
 
         cost += w_att * ca.sumsqr(QR[k][3:6])                     # attitude -> level
         cost += w_reg_a * ca.sumsqr(AR[k]) + w_reg_v * ca.sumsqr(VR[k])

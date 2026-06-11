@@ -51,7 +51,7 @@ def main():
           f"phi_r={phi_of(Rr_g):+.2f} deg")
     print()
 
-    for gap_cm in (16.0, 18.0, 20.0, 22.0):
+    for gap_cm in (26.0, 28.0, 30.0, 32.0):
         x_open = -gap_cm / 200.0   # left pad target x (half the gap, negative side)
 
         def resid(p):

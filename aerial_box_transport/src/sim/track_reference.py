@@ -63,7 +63,7 @@ RACK_USD = f"{_REPO}/surroundings/rack_l01/rack_l01_inst_base.usd"
 BOX_USD = f"{_REPO}/box/cubebox_a01/cubebox_a01.usd"
 DESK_POS = (2.0, 0.0, 0.0)
 RACK_POS = (-2.0, 0.0, 0.0)
-BOX_BASE_TO_CENTER = 0.0526   # box prim origin sits at its base; its center is this far up
+BOX_BASE_TO_CENTER = 0.079    # box prim origin at its base; center this far up (taller box 0.158/2)
 # pad inner-face contact point in the link4 body frame (matches the OCP EE), used to
 # read the ACTUAL gripper midpoint from the sim for debugging / closed-loop box attach.
 EE_OFFSET = {"l": np.array([-0.3969, -0.067, 0.0]), "r": np.array([0.397, -0.067, 0.0])}
@@ -110,6 +110,8 @@ class TrackSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Box",
         spawn=sim_utils.UsdFileCfg(
             usd_path=BOX_USD,
+            scale=(1.0, 1.0, 1.5),                              # taller box: centre ~8 cm above desk
+            mass_props=sim_utils.MassPropertiesCfg(mass=1.0),   # override so the bigger box stays light
             variants={"PhysicsVariant": "RigidBody"},
             # DYNAMIC box: rests on the desk, gripped by the pads via friction, carried,
             # placed on the shelf. Colliders ON so the grippers/desk/rack can touch it.
