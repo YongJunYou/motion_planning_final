@@ -21,7 +21,7 @@ simulation_app = app_launcher.app
 import numpy as np
 import torch
 import omni.usd
-from pxr import Gf, Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -80,13 +80,32 @@ STAND90_ANGLE_RAD = math.radians(90.0)
 
 # ----------------------------------------------------------------------------
 # Hardcoded box grasp reference
+# Box dimensions from box/cubebox_aXX/cubebox_aXX.usd BBox (X/Y/Z, meters).
+# Mass is estimated from mesh volume * cardboard density 689 kg/m^3:
+#   cubebox_a01: 0.105715 / 0.105188 / 0.105250  (10.57 / 10.52 / 10.52 cm)
+#   cubebox_a02: 0.157223 / 0.156164 / 0.158686  (15.72 / 15.62 / 15.87 cm) 
+#   cubebox_a03: 0.204012 / 0.207139 / 0.210534  (20.40 / 20.71 / 21.05 cm) 
+#   cubebox_a04: 0.259892 / 0.260359 / 0.262248  (25.99 / 26.04 / 26.22 cm) 
+#   cubebox_a05: 0.316242 / 0.310176 / 0.314759  (31.62 / 31.02 / 31.48 cm) 
+#   cubebox_a06: 0.413185 / 0.413572 / 0.421242  (41.32 / 41.36 / 42.12 cm) 
 # ----------------------------------------------------------------------------
-BOX_POS = (2.0, 0.0, 0.785)
+BOX_POS = (2.0, 0.0, 0.785) # m
+BOX_MASS = 0.4 # kg
+
 GRASP_HOVER_TIME = 2.0
 GRASP_APPROACH_TIME = 5.0
 GRASP_CLOSE_TIME = 3.0
 GRASP_APPROACH_X = 1.45
 GRASP_APPROACH_Z_OFFSET = 0.2
+PLACE_LIFT_TIME = 3.0
+PLACE_TURN_TIME = 1.5
+PLACE_RACK_APPROACH_TIME = 5.0
+PLACE_RELEASE_TIME = 2.0
+RACK_POS = (-2.0, 0.0, 0.0)
+RACK_TOP_Z = 1.35
+RACK_APPROACH_X = -1.45
+RACK_APPROACH_Y = 0.0
+BOX_HEIGHT = 0.262248
 
 ARM_PREGRASP = {
     "dof_l1": +0.45, "dof_l2": 1.15, "dof_l3": 0.75, "dof_l4": 0.20,
@@ -94,8 +113,8 @@ ARM_PREGRASP = {
 }
 
 ARM_GRASP = {
-    "dof_l1": +0.18, "dof_l2": 1.35, "dof_l3": 1.05, "dof_l4": 0.85,
-    "dof_r1": -0.18, "dof_r2": 1.35, "dof_r3": 1.05, "dof_r4": 0.85,
+    "dof_l1": +0.18, "dof_l2": 2.50, "dof_l3": 1.35, "dof_l4": 1.15,
+    "dof_r1": -0.18, "dof_r2": 2.50, "dof_r3": 1.35, "dof_r4": 1.15,
 }
 
 # ----------------------------------------------------------------------------
@@ -174,7 +193,7 @@ class FlightSceneCfg(InteractiveSceneCfg):
     box: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Box",
         spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/yyj/motion_planning_final/box/cubebox_a01/cubebox_a01.usd",
+            usd_path="/home/yyj/motion_planning_final/box/cubebox_a04/cubebox_a04.usd", # 스폰할 박스 모델 선택, mass ~= 0.498 kg
             variants={"PhysicsVariant": "RigidBody"},
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
@@ -552,6 +571,26 @@ def vee(s):
 # ----------------------------------------------------------------------------
 # main loop helpers
 # ----------------------------------------------------------------------------
+def apply_box_mass_override(stage, num_envs, mass):
+    """Apply an explicit USD mass to each spawned box before PhysX creates tensors."""
+    for env_i in range(num_envs):
+        box_root_path = f"/World/envs/env_{env_i}/Box"
+        box_root = stage.GetPrimAtPath(box_root_path)
+        if not box_root.IsValid():
+            print(f"[WARN] box root not found while setting mass: {box_root_path}")
+            continue
+
+        rigid_prims = [
+            prim for prim in Usd.PrimRange(box_root)
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI)
+        ]
+        target_prims = rigid_prims or [box_root]
+        for prim in target_prims:
+            mass_api = UsdPhysics.MassAPI.Apply(prim)
+            mass_api.CreateMassAttr(float(mass))
+            print(f"[MASS] {prim.GetPath()} physics:mass = {float(mass):.3f} kg")
+
+
 def setup_sim_scene_and_robot():
     """시뮬레이션/씬/스피너를 만들고 reset까지 수행한다."""
     sim_cfg = sim_utils.SimulationCfg(device=args_cli.device, dt=1.0 / 200.0)
@@ -562,6 +601,7 @@ def setup_sim_scene_and_robot():
 
     # AddTransformOp / collision 제거는 USD 구조 변경이라 sim.reset() 이전에 해야 함.
     stage = omni.usd.get_context().get_stage()
+    apply_box_mass_override(stage, args_cli.num_envs, BOX_MASS)
     spinner = PropSpinner(stage, args_cli.num_envs)
 
     sim.reset()
@@ -793,27 +833,92 @@ def straight_line_reference(t, p_start, p_goal, duration, num_envs, device):
     return p, v, a
 
 
+def hold_reference(pos, R_d, num_envs, device):
+    p_d = torch.tensor(pos, device=device).repeat(num_envs, 1)
+    v_d = torch.zeros(num_envs, 3, device=device)
+    a_d = torch.zeros(num_envs, 3, device=device)
+    return p_d, v_d, a_d, R_d
+
+
+def place_z():
+    return RACK_TOP_Z + 0.5 * BOX_HEIGHT + GRASP_APPROACH_Z_OFFSET
+
+
+def body_minus_y_yaw_to_direction(dx, dy):
+    if math.hypot(dx, dy) <= 1.0e-9:
+        return 0.0
+    return math.atan2(dy, dx) + 0.5 * math.pi
+
+
+def interpolate_angle(a0, a1, s):
+    delta = (a1 - a0 + math.pi) % (2.0 * math.pi) - math.pi
+    return a0 + smoothstep(s) * delta
+
+
 def grasp_flight_reference(t, height, num_envs, device):
-    """원점 hover -> 박스 앞까지 직진 접근 -> 제자리 grasp."""
+    """원점 hover -> 박스 grasp -> lift -> turn -> rack 접근 -> release."""
     p_hover = (0.0, 0.0, height)
-    p_approach = (GRASP_APPROACH_X, 0.0, BOX_POS[2] + GRASP_APPROACH_Z_OFFSET)
-    R_d = velocity_aligned_rotation(BOX_POS[0], BOX_POS[1], num_envs, device)
+    p_grasp = (GRASP_APPROACH_X, 0.0, BOX_POS[2] + GRASP_APPROACH_Z_OFFSET)
+    p_lift = (GRASP_APPROACH_X, 0.0, place_z())
+    p_rack = (RACK_APPROACH_X, RACK_APPROACH_Y, place_z())
+
+    grasp_yaw = body_minus_y_yaw_to_direction(BOX_POS[0], BOX_POS[1])
+    rack_yaw = body_minus_y_yaw_to_direction(
+        RACK_POS[0] - GRASP_APPROACH_X,
+        RACK_POS[1],
+    )
+    R_grasp = planar_rotation(grasp_yaw, num_envs, device)
+    R_rack = planar_rotation(rack_yaw, num_envs, device)
 
     if t < GRASP_HOVER_TIME:
-        p_d = torch.tensor(p_hover, device=device).repeat(num_envs, 1)
-        v_d = torch.zeros(num_envs, 3, device=device)
-        a_d = torch.zeros(num_envs, 3, device=device)
-        return p_d, v_d, a_d, R_d
+        return hold_reference(p_hover, R_grasp, num_envs, device)
 
-    p_d, v_d, a_d = straight_line_reference(
-        t - GRASP_HOVER_TIME,
-        p_hover,
-        p_approach,
-        GRASP_APPROACH_TIME,
-        num_envs,
-        device,
-    )
-    return p_d, v_d, a_d, R_d
+    t -= GRASP_HOVER_TIME
+    if t < GRASP_APPROACH_TIME:
+        p_d, v_d, a_d = straight_line_reference(
+            t,
+            p_hover,
+            p_grasp,
+            GRASP_APPROACH_TIME,
+            num_envs,
+            device,
+        )
+        return p_d, v_d, a_d, R_grasp
+
+    t -= GRASP_APPROACH_TIME
+    if t < GRASP_CLOSE_TIME:
+        return hold_reference(p_grasp, R_grasp, num_envs, device)
+
+    t -= GRASP_CLOSE_TIME
+    if t < PLACE_LIFT_TIME:
+        p_d, v_d, a_d = straight_line_reference(
+            t,
+            p_grasp,
+            p_lift,
+            PLACE_LIFT_TIME,
+            num_envs,
+            device,
+        )
+        return p_d, v_d, a_d, R_grasp
+
+    t -= PLACE_LIFT_TIME
+    if t < PLACE_TURN_TIME:
+        yaw = interpolate_angle(grasp_yaw, rack_yaw, t / PLACE_TURN_TIME)
+        return hold_reference(p_lift, planar_rotation(yaw, num_envs, device), num_envs, device)
+
+    t -= PLACE_TURN_TIME
+    if t < PLACE_RACK_APPROACH_TIME:
+        p_d, v_d, a_d = straight_line_reference(
+            t,
+            p_lift,
+            p_rack,
+            PLACE_RACK_APPROACH_TIME,
+            num_envs,
+            device,
+        )
+        return p_d, v_d, a_d, R_rack
+
+    return hold_reference(p_rack, R_rack, num_envs, device)
 
 
 def arm_pose_from_names(default_q, arm_joint_ids, arm_joint_names, named_pose):
@@ -827,7 +932,7 @@ def arm_pose_from_names(default_q, arm_joint_ids, arm_joint_names, named_pose):
 
 
 def grasp_arm_reference(t, default_q, arm_joint_ids, arm_joint_names):
-    """원점 hover(home) -> approach(pregrasp) -> grasp(closed) joint target."""
+    """home -> pregrasp -> grasp 유지 -> rack 위에서 release."""
     ids = torch.as_tensor(arm_joint_ids, device=default_q.device, dtype=torch.long)
     if ids.numel() == 0:
         return None
@@ -835,15 +940,30 @@ def grasp_arm_reference(t, default_q, arm_joint_ids, arm_joint_names):
     q_home = default_q[:, ids].clone()
     q_pregrasp = arm_pose_from_names(default_q, ids, arm_joint_names, ARM_PREGRASP)
     q_grasp = arm_pose_from_names(default_q, ids, arm_joint_names, ARM_GRASP)
+    t_close_start = GRASP_HOVER_TIME + GRASP_APPROACH_TIME
+    t_close_end = t_close_start + GRASP_CLOSE_TIME
+    t_release_start = (
+        t_close_end
+        + PLACE_LIFT_TIME
+        + PLACE_TURN_TIME
+        + PLACE_RACK_APPROACH_TIME
+    )
 
     if t < GRASP_HOVER_TIME:
         return q_home
-    if t < GRASP_HOVER_TIME + GRASP_APPROACH_TIME:
+    if t < t_close_start:
         s = smoothstep((t - GRASP_HOVER_TIME) / GRASP_APPROACH_TIME)
         return (1.0 - s) * q_home + s * q_pregrasp
 
-    s = smoothstep((t - GRASP_HOVER_TIME - GRASP_APPROACH_TIME) / GRASP_CLOSE_TIME)
-    return (1.0 - s) * q_pregrasp + s * q_grasp
+    if t < t_close_end:
+        s = smoothstep((t - t_close_start) / GRASP_CLOSE_TIME)
+        return (1.0 - s) * q_pregrasp + s * q_grasp
+
+    if t < t_release_start:
+        return q_grasp
+
+    s = smoothstep((t - t_release_start) / PLACE_RELEASE_TIME)
+    return (1.0 - s) * q_grasp + s * q_pregrasp
 
 
 def apply_grasp_arm_reference(joint_target, default_q, arm_joint_ids, arm_joint_names, mode, t):
@@ -858,11 +978,28 @@ def apply_grasp_arm_reference(joint_target, default_q, arm_joint_ids, arm_joint_
 
 
 def grasp_stage_name(t):
+    t_approach_end = GRASP_HOVER_TIME + GRASP_APPROACH_TIME
+    t_grasp_end = t_approach_end + GRASP_CLOSE_TIME
+    t_lift_end = t_grasp_end + PLACE_LIFT_TIME
+    t_turn_end = t_lift_end + PLACE_TURN_TIME
+    t_rack_approach_end = t_turn_end + PLACE_RACK_APPROACH_TIME
+    t_release_end = t_rack_approach_end + PLACE_RELEASE_TIME
+
     if t < GRASP_HOVER_TIME:
         return "hover"
-    if t < GRASP_HOVER_TIME + GRASP_APPROACH_TIME:
-        return "approach"
-    return "grasp"
+    if t < t_approach_end:
+        return "box_approach"
+    if t < t_grasp_end:
+        return "grasp"
+    if t < t_lift_end:
+        return "lift"
+    if t < t_turn_end:
+        return "turn"
+    if t < t_rack_approach_end:
+        return "rack_approach"
+    if t < t_release_end:
+        return "release"
+    return "released"
 
 
 def compute_tiltrotor_body_wrench(ctrl, robot, p_d, v_d, a_d, R_d, sim_dt):
@@ -1206,10 +1343,15 @@ def main():
     print_startup_log(m_total, thrust_hover, J_base, rotor_names)
     print(f"[INFO]: tilt joints={tilt_joint_names}")
     if args_cli.mode == "grasp":
-        print("[INFO]: grasp reference = origin hover -> straight approach -> grasp")
+        print("[INFO]: grasp reference = hover -> box approach -> grasp -> lift -> turn -> rack approach -> release")
         print(
-            f"[INFO]: box={BOX_POS}, approach_pos="
+            f"[INFO]: box={BOX_POS}, box_approach_pos="
             f"({GRASP_APPROACH_X:.2f}, 0.00, {BOX_POS[2] + GRASP_APPROACH_Z_OFFSET:.2f})"
+        )
+        print(
+            f"[INFO]: rack={RACK_POS}, rack_approach_pos="
+            f"({RACK_APPROACH_X:.2f}, {RACK_APPROACH_Y:.2f}, {place_z():.2f}), "
+            f"rack_top_z={RACK_TOP_Z:.2f}"
         )
         print(f"[INFO]: arm joints={arm_joint_names}")
     ros_pub = setup_ros2_debug_publisher(spins)
