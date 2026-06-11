@@ -12,6 +12,18 @@ parser.add_argument("--mode", type=str, default="hover", choices=["hover", "circ
 parser.add_argument("--radius", type=float, default=1.0, help="Circle radius [m].")
 parser.add_argument("--period", type=float, default=8.0, help="Circle period [s].")
 parser.add_argument("--ref_height", type=float, default=1.8, help="Hover altitude [m].")
+parser.add_argument(
+    "--viewer_render_interval",
+    type=int,
+    default=8,
+    help="Render the viewport once every N physics steps.",
+)
+parser.add_argument(
+    "--ros_pub_interval",
+    type=int,
+    default=10,
+    help="Publish ROS2 debug topics once every N physics steps.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -20,8 +32,9 @@ simulation_app = app_launcher.app
 
 import numpy as np
 import torch
+import carb
 import omni.usd
-from pxr import Gf, Usd, UsdGeom, UsdPhysics
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -124,6 +137,17 @@ PROP_DUCTS = ["lb", "lf", "rb", "rf"]            # thrusts의 열 인덱스 순�
 PROP_LEAVES = ["_prop_up", "_prop_dn"]           # 덕트당 동축 프롭 2개 (USD prim 이름 suffix)
 PROP_SIGN = [+1, -1]                             # 동축 쌍(up/dn)은 서로 반대 회전
 VIS_RATE = 1500.0                                # 호버 추력 기준 회전속도 [deg/s], 취향껏
+
+# ----------------------------------------------------------------------------
+# Visual-only collision cost volume (physics에 영향 없음)
+# ----------------------------------------------------------------------------
+COST_ELLIPSOID_NAME = "cost_visual_ellipsoid"
+COST_ELLIPSOID_MATERIAL_PATH = "/World/Looks/cost_volume_transparent"
+COST_ELLIPSOID_RADII = (0.7, 0.45, 0.25)
+COST_ELLIPSOID_LOCAL_POS = (0.0, 0.0, 0.0)
+COST_ELLIPSOID_LOCAL_RPY_DEG = (0.0, 0.0, 0.0)
+COST_ELLIPSOID_COLOR = (0.0, 0.75, 1.0)
+COST_ELLIPSOID_OPACITY = 0.35
 
 # ----------------------------------------------------------------------------
 # Visual propeller spin (physics에 영향 없음)
@@ -341,8 +365,8 @@ class Ros2CurrentPublisher:
       /tiltrotor/current/path             nav_msgs/Path
       /tiltrotor/current/rotor_thrusts    std_msgs/Float32MultiArray
       /tiltrotor/current/wrench           geometry_msgs/WrenchStamped, CAD-origin body wrench
-      /manipulator/current/l_contact_wrench geometry_msgs/WrenchStamped, world-frame contact force
-      /manipulator/current/r_contact_wrench geometry_msgs/WrenchStamped, world-frame contact force
+      /manipulator/current/l_contact_force std_msgs/Float32, left force magnitude
+      /manipulator/current/r_contact_force std_msgs/Float32, right force magnitude
     """
 
     def __init__(self, frame_id="world", child_frame_id="base_link", path_max=4000,
@@ -361,7 +385,7 @@ class Ros2CurrentPublisher:
         import rclpy
         from geometry_msgs.msg import PoseStamped, WrenchStamped
         from nav_msgs.msg import Odometry, Path
-        from std_msgs.msg import Float32MultiArray
+        from std_msgs.msg import Float32, Float32MultiArray
 
         if not rclpy.ok():
             rclpy.init(args=[])
@@ -371,6 +395,7 @@ class Ros2CurrentPublisher:
         self.Path = Path
         self.PoseStamped = PoseStamped
         self.WrenchStamped = WrenchStamped
+        self.Float32 = Float32
         self.Float32MultiArray = Float32MultiArray
 
         self.node = rclpy.create_node("isaaclab_tiltrotor_debug")
@@ -381,10 +406,10 @@ class Ros2CurrentPublisher:
             Float32MultiArray, "/tiltrotor/current/rotor_thrusts", 10)
         self.pub_wrench = self.node.create_publisher(
             WrenchStamped, "/tiltrotor/current/wrench", 10)
-        self.pub_l_contact_wrench = self.node.create_publisher(
-            WrenchStamped, "/manipulator/current/l_contact_wrench", 10)
-        self.pub_r_contact_wrench = self.node.create_publisher(
-            WrenchStamped, "/manipulator/current/r_contact_wrench", 10)
+        self.pub_l_contact_force = self.node.create_publisher(
+            Float32, "/manipulator/current/l_contact_force", 10)
+        self.pub_r_contact_force = self.node.create_publisher(
+            Float32, "/manipulator/current/r_contact_force", 10)
 
         self.frame_id = frame_id
         self.child_frame_id = child_frame_id
@@ -403,7 +428,7 @@ class Ros2CurrentPublisher:
 
     def print_local_topics(self):
         topic_names = [name for name, _ in self.node.get_topic_names_and_types()
-                       if name.startswith("/tiltrotor")]
+                       if name.startswith(("/tiltrotor", "/manipulator"))]
         if topic_names:
             print("[INFO]: ROS2 topics visible from publisher node:")
             for name in sorted(topic_names):
@@ -444,22 +469,12 @@ class Ros2CurrentPublisher:
         msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z = map(float, torque)
         return msg
 
-    def _contact_wrench_msg(self, stamp, force=None):
-        msg = self.WrenchStamped()
-        msg.header.stamp = stamp
-        msg.header.frame_id = self.frame_id
-
-        if force is None:
-            force_cpu = torch.zeros(3)
-        else:
-            force_cpu = force.detach().float().cpu().reshape(3)
-        msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z = map(float, force_cpu)
-        msg.wrench.torque.x = 0.0
-        msg.wrench.torque.y = 0.0
-        msg.wrench.torque.z = 0.0
+    def _scalar_msg(self, value=0.0):
+        msg = self.Float32()
+        msg.data = float(value)
         return msg
 
-    def publish(self, robot, thrusts, wrench=None, contact_forces=None):
+    def publish(self, robot, thrusts, wrench=None, contact_force_magnitudes=None):
         stamp = self.node.get_clock().now().to_msg()
         pos = robot.data.root_pos_w[0].tolist()
         quat = robot.data.root_quat_w[0].tolist()
@@ -482,16 +497,16 @@ class Ros2CurrentPublisher:
         thrust_msg.data = [float(v) for v in thrusts[0].tolist()]
         self.pub_thrusts.publish(thrust_msg)
         self.pub_wrench.publish(self._wrench_msg(stamp, thrusts, wrench))
-        l_contact_force = None
-        r_contact_force = None
-        if contact_forces is not None:
-            contact_forces = contact_forces.detach().float()
-            if contact_forces.ndim == 3:
-                contact_forces = contact_forces[0]
-            l_contact_force = contact_forces[0]
-            r_contact_force = contact_forces[1]
-        self.pub_l_contact_wrench.publish(self._contact_wrench_msg(stamp, l_contact_force))
-        self.pub_r_contact_wrench.publish(self._contact_wrench_msg(stamp, r_contact_force))
+        l_contact_force = 0.0
+        r_contact_force = 0.0
+        if contact_force_magnitudes is not None:
+            forces_cpu = contact_force_magnitudes.detach().float().cpu()
+            if forces_cpu.ndim == 2:
+                forces_cpu = forces_cpu[0]
+            l_contact_force = forces_cpu[0].item()
+            r_contact_force = forces_cpu[1].item()
+        self.pub_l_contact_force.publish(self._scalar_msg(l_contact_force))
+        self.pub_r_contact_force.publish(self._scalar_msg(r_contact_force))
 
         self.path.poses.append(pose)
         if len(self.path.poses) > self.path_max:
@@ -568,6 +583,176 @@ class DronePID:
 def vee(s):
     return torch.stack([s[..., 2, 1], s[..., 0, 2], s[..., 1, 0]], dim=-1)
 
+
+# ----------------------------------------------------------------------------
+# visual-only cost ellipsoid helpers
+# ----------------------------------------------------------------------------
+def make_transparent_preview_material(
+    stage,
+    mat_path,
+    color=COST_ELLIPSOID_COLOR,
+    opacity=COST_ELLIPSOID_OPACITY,
+):
+    UsdGeom.Scope.Define(stage, "/World/Looks")
+    mat = UsdShade.Material.Define(stage, mat_path)
+
+    mdl_shader = UsdShade.Shader.Define(stage, mat_path + "/Shader")
+    mdl_shader_out = mdl_shader.CreateOutput("out", Sdf.ValueTypeNames.Token)
+    mdl_shader.CreateIdAttr("OmniPBR_Opacity")
+    mdl_shader.GetImplementationSourceAttr().Set(UsdShade.Tokens.sourceAsset)
+    mdl_shader.SetSourceAsset(Sdf.AssetPath("OmniPBR_Opacity.mdl"), "mdl")
+    mdl_shader.SetSourceAssetSubIdentifier("OmniPBR_Opacity", "mdl")
+
+    mdl_shader.CreateInput("diffuse_color_constant", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
+    mdl_shader.CreateInput("reflection_roughness_constant", Sdf.ValueTypeNames.Float).Set(0.35)
+    mdl_shader.CreateInput("enable_opacity", Sdf.ValueTypeNames.Bool).Set(True)
+    mdl_shader.CreateInput("enable_opacity_texture", Sdf.ValueTypeNames.Bool).Set(False)
+    mdl_shader.CreateInput("opacity_constant", Sdf.ValueTypeNames.Float).Set(float(opacity))
+    mdl_shader.CreateInput("opacity_mode", Sdf.ValueTypeNames.Int).Set(1)
+    mdl_shader.CreateInput("opacity_threshold", Sdf.ValueTypeNames.Float).Set(0.0)
+
+    preview_shader = UsdShade.Shader.Define(stage, mat_path + "/PreviewSurface")
+    preview_shader.CreateIdAttr("UsdPreviewSurface")
+    preview_shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
+    preview_shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(float(opacity))
+    preview_shader.CreateInput("opacityThreshold", Sdf.ValueTypeNames.Float).Set(0.0)
+    preview_shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.35)
+
+    mat.CreateSurfaceOutput("mdl").ConnectToSource(mdl_shader_out)
+    mat.CreateVolumeOutput("mdl").ConnectToSource(mdl_shader_out)
+    mat.CreateDisplacementOutput("mdl").ConnectToSource(mdl_shader_out)
+    mat.CreateSurfaceOutput().ConnectToSource(preview_shader.ConnectableAPI(), "surface")
+    return mat
+
+
+def set_realtime_render_mode():
+    try:
+        settings = carb.settings.get_settings()
+        previous = settings.get("/rtx/rendermode")
+        settings.set("/rtx/rendermode", "RaytracedLighting")
+        settings.set("/rtx/post/motionblur/enabled", False)
+        print(f"[INFO]: RTX render mode set to RaytracedLighting (previous={previous}).")
+    except Exception as exc:
+        print(f"[WARN]: Failed to set RTX real-time render mode ({exc}).")
+
+
+def strip_physics_apis(prim):
+    """Keep the cost volume visual-only, with no collision/rigid/mass behavior."""
+    for api in (UsdPhysics.CollisionAPI, UsdPhysics.RigidBodyAPI, UsdPhysics.MassAPI):
+        try:
+            if prim.HasAPI(api):
+                prim.RemoveAPI(api)
+        except Exception:
+            pass
+
+    for schema in list(prim.GetAppliedSchemas()):
+        if "Collision" in schema or "RigidBody" in schema or "Mass" in schema or "PhysxRigid" in schema:
+            try:
+                prim.RemoveAppliedSchema(schema)
+            except Exception:
+                pass
+
+    attr = prim.GetAttribute("physics:collisionEnabled")
+    if not attr:
+        attr = prim.CreateAttribute("physics:collisionEnabled", Sdf.ValueTypeNames.Bool)
+    attr.Set(False)
+
+    physx_attr = prim.GetAttribute("physxCollision:collisionEnabled")
+    if not physx_attr:
+        physx_attr = prim.CreateAttribute("physxCollision:collisionEnabled", Sdf.ValueTypeNames.Bool)
+    physx_attr.Set(False)
+
+
+def force_visible_prim(prim, opacity=COST_ELLIPSOID_OPACITY):
+    imageable = UsdGeom.Imageable(prim)
+    imageable.MakeVisible()
+    imageable.CreateVisibilityAttr().Set(UsdGeom.Tokens.inherited)
+    imageable.CreatePurposeAttr().Set(UsdGeom.Tokens.default_)
+
+    gprim = UsdGeom.Gprim(prim)
+    gprim.CreateDisplayOpacityAttr().Set([float(opacity)])
+    gprim.CreateDoubleSidedAttr().Set(True)
+
+
+def find_child_prim_by_name(root_prim, name):
+    if not root_prim.IsValid():
+        return None
+    for prim in Usd.PrimRange(root_prim):
+        if prim.GetName() == name:
+            return prim
+    return None
+
+
+def create_visual_ellipsoid(
+    stage,
+    base_path,
+    radii=COST_ELLIPSOID_RADII,
+    local_pos=COST_ELLIPSOID_LOCAL_POS,
+    local_rpy_deg=COST_ELLIPSOID_LOCAL_RPY_DEG,
+    color=COST_ELLIPSOID_COLOR,
+    opacity=COST_ELLIPSOID_OPACITY,
+):
+    base_prim = stage.GetPrimAtPath(base_path)
+    if not base_prim.IsValid():
+        print(f"[WARN] cost ellipsoid base prim not found: {base_path}")
+        return None
+
+    ellipsoid_path = str(Sdf.Path(base_path).AppendChild(COST_ELLIPSOID_NAME))
+    if stage.GetPrimAtPath(ellipsoid_path).IsValid():
+        stage.RemovePrim(ellipsoid_path)
+
+    sphere = UsdGeom.Sphere.Define(stage, ellipsoid_path)
+    sphere.CreateRadiusAttr(1.0)
+
+    prim = sphere.GetPrim()
+    xform = UsdGeom.XformCommonAPI(prim)
+    xform.SetTranslate(Gf.Vec3d(*local_pos))
+    xform.SetRotate(
+        Gf.Vec3f(*local_rpy_deg),
+        UsdGeom.XformCommonAPI.RotationOrderXYZ,
+    )
+    xform.SetScale(Gf.Vec3f(*radii))
+
+    gprim = UsdGeom.Gprim(prim)
+    gprim.CreateDisplayColorAttr().Set([Gf.Vec3f(*color)])
+    gprim.CreateDisplayOpacityAttr().Set([float(opacity)])
+    gprim.CreateDoubleSidedAttr().Set(True)
+    force_visible_prim(prim, opacity=opacity)
+
+    mat = make_transparent_preview_material(
+        stage,
+        COST_ELLIPSOID_MATERIAL_PATH,
+        color=color,
+        opacity=opacity,
+    )
+    UsdShade.MaterialBindingAPI(prim).Bind(mat)
+
+    strip_physics_apis(prim)
+    return ellipsoid_path
+
+
+def create_cost_visual_ellipsoids(stage, num_envs):
+    paths = []
+    for env_i in range(num_envs):
+        robot_root_path = f"/World/envs/env_{env_i}/Robot"
+        robot_root = stage.GetPrimAtPath(robot_root_path)
+        base_prim = find_child_prim_by_name(robot_root, "base_link_01")
+        if base_prim is None:
+            print(f"[WARN] base_link_01 not found under {robot_root_path}; cost ellipsoid skipped")
+            continue
+
+        path = create_visual_ellipsoid(stage, str(base_prim.GetPath()))
+        if path is not None:
+            paths.append(path)
+            print(f"[INFO]: Created visual-only cost ellipsoid: {path}")
+    if paths:
+        try:
+            omni.usd.get_context().get_selection().set_selected_prim_paths(paths[:1], True)
+            print(f"[INFO]: Selected cost ellipsoid for viewport framing: {paths[0]}")
+        except Exception as exc:
+            print(f"[WARN]: Failed to select cost ellipsoid ({exc}).")
+    return paths
+
 # ----------------------------------------------------------------------------
 # main loop helpers
 # ----------------------------------------------------------------------------
@@ -593,9 +778,17 @@ def apply_box_mass_override(stage, num_envs, mass):
 
 def setup_sim_scene_and_robot():
     """시뮬레이션/씬/스피너를 만들고 reset까지 수행한다."""
-    sim_cfg = sim_utils.SimulationCfg(device=args_cli.device, dt=1.0 / 200.0)
+    set_realtime_render_mode()
+
+    render_interval = max(1, int(args_cli.viewer_render_interval))
+    sim_cfg = sim_utils.SimulationCfg(
+        device=args_cli.device,
+        dt=1.0 / 200.0,
+        render_interval=render_interval,
+    )
     sim = sim_utils.SimulationContext(sim_cfg)
     sim.set_camera_view(eye=[2.5, 2.5, 2.0], target=[0.0, 0.0, 1.0])
+    print(f"[INFO]: viewport render interval = every {render_interval} physics steps")
 
     scene = InteractiveScene(FlightSceneCfg(num_envs=args_cli.num_envs, env_spacing=4.0))
 
@@ -605,6 +798,9 @@ def setup_sim_scene_and_robot():
     spinner = PropSpinner(stage, args_cli.num_envs)
 
     sim.reset()
+    # Cost ellipsoid visualization is disabled while debugging real-time performance.
+    # create_cost_visual_ellipsoids(stage, args_cli.num_envs)
+    print("[INFO]: cost ellipsoid visualization disabled")
     robot: Articulation = scene["robot"]
     return sim, scene, spinner, robot
 
@@ -1212,20 +1408,23 @@ def apply_body_wrench(robot, forces, torques, body_ids):
     """controller가 만든 body-frame +z thrust와 body-frame torque를 그대로 적용한다."""
     robot.set_external_force_and_torque(forces, torques, body_ids=body_ids)
 
-def step_simulation(sim, scene, sim_dt):
+def step_simulation(sim, scene, sim_dt, render=True):
     scene.write_data_to_sim()
-    sim.step()
+    sim.step(render=False)
+    if render:
+        sim.render()
     scene.update(sim_dt)
 
-def read_arm_contact_forces(scene):
-    """Return contact net forces in world frame as [num_envs, left/right, xyz]."""
+def read_arm_contact_force_magnitudes(scene):
+    """Return contact net force magnitudes as [num_envs, left/right]."""
     force_l = scene["l_contact"].data.net_forces_w
     force_r = scene["r_contact"].data.net_forces_w
     if force_l.ndim == 3:
         force_l = force_l[:, 0, :]
     if force_r.ndim == 3:
         force_r = force_r[:, 0, :]
-    return torch.stack((force_l, force_r), dim=1)
+    return torch.stack((torch.linalg.norm(force_l, dim=-1),
+                        torch.linalg.norm(force_r, dim=-1)), dim=1)
 
 def rotation_error_deg(R_d, R):
     err = torch.bmm(R_d.transpose(1, 2), R)
@@ -1257,8 +1456,8 @@ def setup_ros2_debug_publisher(spins):
     print("        /tiltrotor/current/path")
     print("        /tiltrotor/current/rotor_thrusts")
     print("        /tiltrotor/current/wrench")
-    print("        /manipulator/current/l_contact_wrench  # force xyz, torque zero")
-    print("        /manipulator/current/r_contact_wrench  # force xyz, torque zero")
+    print("        /manipulator/current/l_contact_force  # Float32, left_N")
+    print("        /manipulator/current/r_contact_force  # Float32, right_N")
     return ros_pub
 
 def print_periodic_status(t, p_d, R_d, robot, thrusts, mode=None, ramp_time=0.0):
@@ -1274,7 +1473,8 @@ def print_periodic_status(t, p_d, R_d, robot, thrusts, mode=None, ramp_time=0.0)
           f"thrusts[N]={thrusts_row[0]:.2f} {thrusts_row[1]:.2f} "
           f"{thrusts_row[2]:.2f} {thrusts_row[3]:.2f}")
 
-def run_control_step(robot, ctrl, body_ids, spinner, state):
+def run_control_step(robot, ctrl, body_ids, spinner, state,
+                     render_visuals=True, visual_dt=None):
     """while 루프의 한 스텝을 기능 단위로 묶은 함수."""
     p_d, v_d, a_d, R_d = make_smooth_reference(
         state.t, state.p0, state.N, state.device, state.ramp_time,
@@ -1305,7 +1505,13 @@ def run_control_step(robot, ctrl, body_ids, spinner, state):
     torques[:, 0, :] = wrench[:, 3:]
     apply_body_wrench(robot, forces, torques, body_ids)
 
-    spinner.update(thrusts, state.spins, state.thrust_hover, state.sim_dt)
+    if render_visuals:
+        spinner.update(
+            thrusts,
+            state.spins,
+            state.thrust_hover,
+            state.sim_dt if visual_dt is None else visual_dt,
+        )
     return p_d, R_d, thrusts, wrench
 
 
@@ -1339,6 +1545,8 @@ def main():
     ramp_time = 4.0
     p0 = robot.data.root_pos_w.clone()
     sim_dt = sim.get_physics_dt()
+    render_interval = max(1, int(args_cli.viewer_render_interval))
+    ros_pub_interval = max(1, int(args_cli.ros_pub_interval))
 
     print_startup_log(m_total, thrust_hover, J_base, rotor_names)
     print(f"[INFO]: tilt joints={tilt_joint_names}")
@@ -1355,6 +1563,8 @@ def main():
         )
         print(f"[INFO]: arm joints={arm_joint_names}")
     ros_pub = setup_ros2_debug_publisher(spins)
+    if ros_pub is not None:
+        print(f"[INFO]: ROS2 debug publish interval = every {ros_pub_interval} physics steps")
 
     state = ControlLoopState(
         t=0.0,
@@ -1379,7 +1589,7 @@ def main():
     )
 
     if ros_pub is not None:
-        zero_contact_forces = torch.zeros(robot_num, 2, 3, device=device)
+        zero_contact_forces = torch.zeros(robot_num, 2, device=device)
         ros_pub.publish(
             robot,
             torch.zeros(robot_num, 4, device=device),
@@ -1391,16 +1601,25 @@ def main():
     # 루프
     try:
         while simulation_app.is_running():
+            render_this_step = (state.count % render_interval) == 0
+            visual_dt = state.sim_dt * render_interval if state.count > 0 else state.sim_dt
             p_d, R_d, thrusts, wrench = run_control_step(
-                robot, ctrl, wrench_body_ids, spinner, state)
+                robot,
+                ctrl,
+                wrench_body_ids,
+                spinner,
+                state,
+                render_visuals=render_this_step,
+                visual_dt=visual_dt,
+            )
 
-            step_simulation(sim, scene, sim_dt)
+            step_simulation(sim, scene, sim_dt, render=render_this_step)
             state.t += sim_dt
             state.count += 1
 
-            if ros_pub is not None:
-                contact_forces = read_arm_contact_forces(scene)
-                ros_pub.publish(robot, thrusts, wrench, contact_forces)
+            if ros_pub is not None and (state.count % ros_pub_interval) == 0:
+                contact_force_magnitudes = read_arm_contact_force_magnitudes(scene)
+                ros_pub.publish(robot, thrusts, wrench, contact_force_magnitudes)
 
             if state.count % 200 == 0:
                 print_periodic_status(
