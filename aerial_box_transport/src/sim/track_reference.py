@@ -115,10 +115,11 @@ class TrackSceneCfg(InteractiveSceneCfg):
                             variants={"PhysicsVariant": "RigidBody"},
                             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)),
                         init_state=AssetBaseCfg.InitialStateCfg(pos=RACK_POS))
-    # awning window the carried box must be threaded through (teammate main.py pose, collision ON).
+    # awning window the carried box is threaded through. VISUAL-ONLY (no collider): the window USD is
+    # a high-poly mesh and enabling its collider made PhysX crawl (~1% real-time). The OCP already
+    # enforces the threading, so the sim only needs to SHOW the window -- no physics collision needed.
     window = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/Window",
-                          spawn=sim_utils.UsdFileCfg(usd_path=WINDOW_USD,
-                              collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)),
+                          spawn=sim_utils.UsdFileCfg(usd_path=WINDOW_USD),
                           init_state=AssetBaseCfg.InitialStateCfg(pos=WINDOW_POS))
     box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Box",
@@ -214,7 +215,7 @@ def main():
     print(f"[INFO] mass={m_total:.3f} kg, arm ids={arm_ids}, ref horizon={ref.t[-1]:.1f}s")
 
     log = {"t": [], "p": [], "p_d": [], "tilt_deg": [], "arm_err": [],
-           "ee_mid": [], "box_set": []}
+           "ee_mid": [], "box_set": [], "fwd_w": []}    # fwd_w = body -y (drone forward) in world
     t, count = 0.0, 0
     T = args_cli.max_time
 
@@ -289,6 +290,7 @@ def main():
             log["p_d"].append(p_d.tolist())
             log["tilt_deg"].append(tilt)
             log["arm_err"].append(float(np.linalg.norm(arm_now - q_arm_d)))
+            log["fwd_w"].append((R @ np.array([0.0, -1.0, 0.0])).tolist())  # drone forward in world
             log["ee_mid"].append(actual_ee_mid().tolist())              # actual gripper midpoint
             log["box_set"].append((box.data.root_pos_w[0].cpu().numpy()
                                    + np.array([0.0, 0.0, BOX_BASE_TO_CENTER])).tolist())  # actual box
@@ -301,7 +303,8 @@ def main():
         p_d = np.array(log["p_d"])
         np.savez(args_cli.out, t=np.array(log["t"]), p=p, p_d=p_d,
                  tilt_deg=np.array(log["tilt_deg"]), arm_err=np.array(log["arm_err"]),
-                 ee_mid=np.array(log["ee_mid"]), box_set=np.array(log["box_set"]))
+                 ee_mid=np.array(log["ee_mid"]), box_set=np.array(log["box_set"]),
+                 fwd_w=np.array(log["fwd_w"]))
         if len(p):
             settle = np.array(log["t"]) > 1.0   # ignore the initial settle
             rmse = np.sqrt(np.mean(np.sum((p[settle] - p_d[settle]) ** 2, axis=1)))

@@ -289,6 +289,7 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
             "arm": np.array([d[0], d[1], d[2], d[3], -d[0], d[1], d[2], d[3]]),  # mirrored L/R
             "d": d,
             "w_wp": float(keyframe.get("w_wp", 600.0)),              # waypoint penalty weight
+            "plateau": int(keyframe.get("plateau", 5)),              # HOLD the tilt over +-this many knots
         }
         # PITCH is about the BODY X axis: the drone's forward is body -y, and pitch tilts that
         # forward direction up/down -> rotation about the lateral (x) axis, NOT world y. Pitching
@@ -302,8 +303,16 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
         kf["k_star"] = int(tr_arr[np.argmin(np.abs(base_ref[tr_arr + 1, 0] - kf["base"][0]))]) + 1
         kf["sigma"] = max(2.0, 0.18 * len(tr))                       # apex bump width in knots
         kf["bump"] = np.exp(-0.5 * ((np.arange(N + 1) - kf["k_star"]) / kf["sigma"]) ** 2)
-        att_scale = 1.0 - 0.98 * kf["bump"]      # ~0 attitude penalty at the apex (allow the tilt)
-        align_scale = 1.0 - 0.95 * kf["bump"]    # ~0 box-under-base penalty (allow the bent reach)
+        # PLATEAU: hold the keyframe pitch over k_star +- plateau knots (a sustained tilt while
+        # crossing the window) rather than a one-knot SPIKE the controller can't track (a 60deg/0.3s
+        # spike read as ~level in the sim and coupled into a heading error). `relax` is 1 across the
+        # whole plateau and Gaussian outside, so the attitude/align penalties are off for the entire
+        # hold, not just the centre.
+        ks_arr = np.arange(N + 1)
+        on_plateau = (np.abs(ks_arr - kf["k_star"]) <= kf["plateau"]).astype(float)
+        kf["relax"] = np.maximum(on_plateau, kf["bump"])
+        att_scale = 1.0 - 0.98 * kf["relax"]     # ~0 attitude penalty across the tilt hold
+        align_scale = 1.0 - 0.95 * kf["relax"]   # ~0 box-under-base penalty across the hold
 
     def contact(qr, pb):
         pl, pr = wb.fk_ee(q_full(qr))
@@ -460,13 +469,15 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
 
         # KEYFRAME waypoint: strong penalty pulling the apex config to the keyframe (base pos +
         # pitch + arm). att/align are relaxed here (above) so this does not fight them.
-        if kf is not None and k == kf["k_star"]:
-            # base POSITION + ATTITUDE only. The ARM is NOT referenced: forcing the arm joints to a
-            # fixed config fights the grasp pinning and makes the sim drop the box. The arm is left
-            # free to whatever holds the grip while the base reaches the through-window pose.
-            cost += add("waypoint", kf["w_wp"] * (
-                ca.sumsqr(QR[k][0:3] - kf["base"])
-                + ca.sumsqr(QR[k][3:6] - kf["theta"])))
+        if kf is not None:
+            # The ARM is NOT referenced (forcing the arm joints drops the box); the arm is free to
+            # hold the grip. base POSITION is pinned at the apex knot; the PITCH (attitude) is HELD
+            # over the whole plateau so the drone crosses the window at a sustained 60deg tilt instead
+            # of a one-knot spike the controller can't follow.
+            if k == kf["k_star"]:
+                cost += add("waypoint", kf["w_wp"] * ca.sumsqr(QR[k][0:3] - kf["base"]))
+            if abs(k - kf["k_star"]) <= kf["plateau"]:
+                cost += add("waypoint", kf["w_wp"] * ca.sumsqr(QR[k][3:6] - kf["theta"]))
 
     opti.subject_to(PB[N] == place)
     cost += add("att", w_att * att_scale[N] * ca.sumsqr(QR[N][3:6]))
@@ -508,12 +519,14 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
     # gives IPOPT a warm start already near the tilted, bent apex pose so it converges there.
     if kf is not None:
         bump = kf["bump"]
+        relax = kf["relax"]
         for k in range(N + 1):
             w = float(bump[k])
-            if w < 1e-3:
-                continue
-            base_ref[k] = (1.0 - w) * base_ref[k] + w * kf["base"]
-            theta_seed[k] = (1.0 - w) * theta_seed[k] + w * kf["theta"]
+            wt = float(relax[k])               # theta uses the plateau (sustained tilt), base the bump
+            if w >= 1e-3:
+                base_ref[k] = (1.0 - w) * base_ref[k] + w * kf["base"]
+            if wt >= 1e-3:
+                theta_seed[k] = (1.0 - wt) * theta_seed[k] + wt * kf["theta"]
             # NOTE: the arm is NOT blended toward the keyframe arm -- it is left at the natural grasp
             # seed so it is free to hold the grip (a forced arm config drops the box).
         if verbose:
