@@ -15,7 +15,8 @@ import re
 import numpy as np
 from pxr import Usd, UsdGeom, UsdPhysics
 
-USD_PATH = "/home/jaewoo/Research/motion_planning_final/dual_arm_final.usd"
+USD_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir,
+                                        os.pardir, "dual_arm_final.usd"))
 OUT = os.path.abspath(os.path.join(
     os.path.dirname(__file__), os.pardir, os.pardir, "config", "usd_model.json"))
 

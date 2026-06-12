@@ -26,7 +26,7 @@ _THIS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(_THIS, os.pardir)))
 from model.whole_body import build_planning_model, ARM_JOINTS  # noqa: E402
 
-USD_PATH = "/home/jaewoo/Research/motion_planning_final/dual_arm_final.usd"
+USD_PATH = os.path.abspath(os.path.join(_THIS, os.pardir, os.pardir, os.pardir, "dual_arm_final.usd"))
 BOX_EDGE = 0.105   # teammate's cubebox_a01 is a 10.5 cm cube (measured from the USD)
 
 

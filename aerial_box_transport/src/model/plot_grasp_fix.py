@@ -23,7 +23,7 @@ _THIS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(_THIS, os.pardir)))
 from model.whole_body import build_planning_model  # noqa: E402
 
-USD_PATH = "/home/jaewoo/Research/motion_planning_final/dual_arm_final.usd"
+USD_PATH = os.path.abspath(os.path.join(_THIS, os.pardir, os.pardir, os.pardir, "dual_arm_final.usd"))
 
 
 def world_pts(prim):

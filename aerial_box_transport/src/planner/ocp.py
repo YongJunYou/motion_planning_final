@@ -49,7 +49,7 @@ def theta_to_R_np(theta):
     return np.eye(3) + np.sin(ang) * K + (1.0 - np.cos(ang)) * (K @ K)
 
 
-def solve_ocp(verbose=False, seed=None, use_cylinders=True):
+def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
     robot, task = load_config()
     c, sq, o = robot["contact"], robot["squeeze"], task["ocp"]
     g, m_o = task["gravity"], task["box"]["m_o"]
@@ -378,11 +378,50 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True):
     # GENTLE -- it overrides only box_guess (the box route) earlier, so base_ref / arm seed /
     # velocities below are built consistently around the sampler route. A raw full-config geometric
     # seed instead fails (it violates the dynamics and the L/R symmetry; IPOPT stalls far from feasible).
+    # build the per-knot arm + attitude SEED arrays (theta is the rotation-vector attitude,
+    # normally seeded level = 0). Splitting them out (vs the old inline [0,0,0]/arm_grasp) lets
+    # an optional KEYFRAME blend a tilted, specific config into the transport apex below.
+    theta_seed = np.zeros((N + 1, 3))
+    arm_seed = np.array([arm_ref_ap[k] if phase_of[min(k, N - 1)] == "approach" else arm_grasp
+                         for k in range(N + 1)])
+
+    # OPTIONAL keyframe seed (GENTLE, transport apex): the caller hands a single full config
+    # (base pos in the home frame, a base pitch, and a 4-DoF arm config) that the warm-start
+    # should pass THROUGH near the top of the carry. We do NOT add a constraint (the user asked
+    # for a seed only) -- we just blend the config into base_ref / theta_seed / arm_seed with a
+    # smooth Gaussian bump over the transport knots, then rebuild the velocity/accel guess from
+    # the blended base_ref so the seed stays dynamically consistent (a hard config injection with
+    # discontinuous velocities is exactly what makes IPOPT stall; the bump keeps it smooth). The
+    # arm config is mirrored L/R (dof1 opposite) so it respects the symmetry constraints, and a
+    # config with dof2-dof3-dof4 = 0 keeps the parallel-jaw constraint satisfied at the apex.
+    if keyframe is not None and len(tr) > 0:
+        kf_base = np.asarray(keyframe["base"], float)             # [x, y, z], home frame
+        kf_pitch = float(keyframe.get("pitch", 0.0))              # rotation about world y [rad]
+        d = np.asarray(keyframe["arm"], float)                    # [dof1, dof2, dof3, dof4]
+        kf_arm = np.array([d[0], d[1], d[2], d[3], -d[0], d[1], d[2], d[3]])
+        kf_theta = np.array([0.0, kf_pitch, 0.0])
+        # place the apex at the transport knot whose existing base-x guess is nearest the
+        # keyframe x (base_ref during transport tracks the carried box, so this is the natural
+        # time the carry passes through that lateral position).
+        tr_arr = np.array(tr)
+        k_star = int(tr_arr[np.argmin(np.abs(base_ref[tr_arr + 1, 0] - kf_base[0]))]) + 1
+        sigma = max(2.0, 0.18 * len(tr))                          # bump width in knots (~smooth)
+        for k in range(N + 1):
+            w = float(np.exp(-0.5 * ((k - k_star) / sigma) ** 2))
+            if w < 1e-3:
+                continue
+            base_ref[k] = (1.0 - w) * base_ref[k] + w * kf_base
+            theta_seed[k] = (1.0 - w) * theta_seed[k] + w * kf_theta
+            arm_seed[k] = (1.0 - w) * arm_seed[k] + w * kf_arm
+        if verbose:
+            print(f"[OCP] keyframe seed at transport knot {k_star}/{N} (t={times[k_star]:.2f}s): "
+                  f"base={np.round(kf_base, 2).tolist()} pitch={np.degrees(kf_pitch):.0f}deg "
+                  f"arm(deg)={np.round(np.degrees(d), 0).tolist()}")
+
     base_v = np.zeros((N + 1, 3))
     base_v[:-1] = (base_ref[1:] - base_ref[:-1]) / dt
     for k in range(N + 1):
-        arm_guess = arm_ref_ap[k] if phase_of[min(k, N - 1)] == "approach" else arm_grasp
-        opti.set_initial(QR[k], np.concatenate([base_ref[k], [0, 0, 0], arm_guess]))
+        opti.set_initial(QR[k], np.concatenate([base_ref[k], theta_seed[k], arm_seed[k]]))
         opti.set_initial(PB[k], box_guess[k])
         opti.set_initial(VR[k], np.concatenate([base_v[k], np.zeros(11)]))
     for k in range(N):

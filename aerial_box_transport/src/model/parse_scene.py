@@ -6,9 +6,13 @@ can be matched to the scene WITHOUT editing the teammate's files.
 
 Run: conda run -n am_dualarm python src/model/parse_scene.py
 """
+import os
+
 from pxr import Usd, UsdGeom, UsdPhysics, Gf
 
-REPO = "/home/jaewoo/Research/motion_planning_final"
+# Repo root is three levels up: src/model -> src -> aerial_box_transport -> repo.
+REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    os.pardir, os.pardir, os.pardir))
 ASSETS = {
     "box  (cubebox_a01)": f"{REPO}/box/cubebox_a01/cubebox_a01.usd",
     "desk (desk_01)": f"{REPO}/surroundings/desk_01/desk_01_inst_base.usd",

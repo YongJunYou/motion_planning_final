@@ -18,7 +18,9 @@ import sys
 from isaaclab.app import AppLauncher
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
-USD = "/home/jaewoo/Research/motion_planning_final/dual_arm_final.usd"
+# Repo root is three levels up: src/sim -> src -> aerial_box_transport -> repo.
+_REPO = os.path.abspath(os.path.join(_THIS, os.pardir, os.pardir, os.pardir))
+USD = f"{_REPO}/dual_arm_final.usd"
 
 parser = argparse.ArgumentParser(description="gRITE closed-loop reference tracking.")
 parser.add_argument("--max_time", type=float, default=5.0)
@@ -57,7 +59,6 @@ ARM_ORDER = [f"dof_{s}{i}" for s in ("l", "r") for i in range(1, 5)]
 # are loaded VISUAL-ONLY (no colliders): the planar arm forces the drone to sit at
 # the box/shelf height, so a physics collider would block it from reaching the box.
 # The box is KINEMATIC and driven along the OCP box path each step.
-_REPO = "/home/jaewoo/Research/motion_planning_final"
 DESK_USD = f"{_REPO}/surroundings/desk_01/desk_01_inst_base.usd"
 RACK_USD = f"{_REPO}/surroundings/rack_l01/rack_l01_inst_base.usd"
 BOX_USD = f"{_REPO}/box/cubebox_a01/cubebox_a01.usd"

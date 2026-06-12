@@ -20,7 +20,8 @@ import os
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Dump Isaac/PhysX model data.")
-parser.add_argument("--usd", default="/home/jaewoo/Research/motion_planning_final/dual_arm_final.usd")
+parser.add_argument("--usd", default=os.path.abspath(os.path.join(
+    os.path.dirname(__file__), os.pardir, os.pardir, os.pardir, "dual_arm_final.usd")))
 parser.add_argument("--out", default=os.path.abspath(os.path.join(
     os.path.dirname(__file__), os.pardir, os.pardir, "config", "isaac_model.json")))
 AppLauncher.add_app_launcher_args(parser)
