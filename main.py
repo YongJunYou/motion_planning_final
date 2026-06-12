@@ -119,9 +119,9 @@ RACK_TOP_Z = 1.35
 RACK_APPROACH_X = -1.45
 RACK_APPROACH_Y = 0.0
 BOX_HEIGHT = 0.262248
-BUILDING_POS = (0.0, 5.0, 0.0)
-BUILDING_COLOR = (0.5, 0.5, 0.5)
-BUILDING_MATERIAL_PATH = "/World/Looks/building_gray"
+WINDOW_POS = (-1.0, 0.0, 0.0)
+WINDOW_COLOR = (0.5, 0.5, 0.5)
+WINDOW_MATERIAL_PATH = "/World/Looks/window_gray"
 
 ARM_PREGRASP = {
     "dof_l1": +0.45, "dof_l2": 1.15, "dof_l3": 0.75, "dof_l4": 0.20,
@@ -244,15 +244,15 @@ class FlightSceneCfg(InteractiveSceneCfg):
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(-2.0, 0.0, 0.0)),
     )
-    building: AssetBaseCfg = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/Building",
+    window: AssetBaseCfg = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Window",
         spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/yyj/motion_planning_final/surroundings/building.usd",
+            usd_path="/home/yyj/motion_planning_final/surroundings/awing_window.usd",
             collision_props=sim_utils.CollisionPropertiesCfg(
                 collision_enabled=True,
             ),
         ),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=BUILDING_POS),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=WINDOW_POS),
     )
 
 # ----------------------------------------------------------------------------
@@ -650,25 +650,25 @@ def make_opaque_preview_material(stage, mat_path, color):
     return mat
 
 
-def apply_building_gray_material(stage, num_envs):
-    mat = make_opaque_preview_material(stage, BUILDING_MATERIAL_PATH, BUILDING_COLOR)
+def apply_window_gray_material(stage, num_envs):
+    mat = make_opaque_preview_material(stage, WINDOW_MATERIAL_PATH, WINDOW_COLOR)
     for env_i in range(num_envs):
-        building_root_path = f"/World/envs/env_{env_i}/Building"
-        building_root = stage.GetPrimAtPath(building_root_path)
-        if not building_root.IsValid():
-            print(f"[WARN] building root not found while setting material: {building_root_path}")
+        window_root_path = f"/World/envs/env_{env_i}/Window"
+        window_root = stage.GetPrimAtPath(window_root_path)
+        if not window_root.IsValid():
+            print(f"[WARN] window root not found while setting material: {window_root_path}")
             continue
 
         bound_count = 0
-        for prim in Usd.PrimRange(building_root):
-            if prim == building_root or prim.IsA(UsdGeom.Gprim):
+        for prim in Usd.PrimRange(window_root):
+            if prim == window_root or prim.IsA(UsdGeom.Gprim):
                 binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
                 try:
                     binding_api.Bind(mat, UsdShade.Tokens.strongerThanDescendants)
                 except TypeError:
                     binding_api.Bind(mat)
                 bound_count += 1
-        print(f"[INFO]: building gray material applied under {building_root_path} ({bound_count} prims)")
+        print(f"[INFO]: window gray material applied under {window_root_path} ({bound_count} prims)")
 
 
 def set_realtime_render_mode():
@@ -841,7 +841,7 @@ def setup_sim_scene_and_robot():
     # AddTransformOp / collision 제거는 USD 구조 변경이라 sim.reset() 이전에 해야 함.
     stage = omni.usd.get_context().get_stage()
     apply_box_mass_override(stage, args_cli.num_envs, BOX_MASS)
-    apply_building_gray_material(stage, args_cli.num_envs)
+    apply_window_gray_material(stage, args_cli.num_envs)
     spinner = PropSpinner(stage, args_cli.num_envs)
 
     sim.reset()
