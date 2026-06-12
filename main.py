@@ -114,9 +114,9 @@ PLACE_LIFT_TIME = 3.0
 PLACE_TURN_TIME = 1.5
 PLACE_RACK_APPROACH_TIME = 5.0
 PLACE_RELEASE_TIME = 2.0
-RACK_POS = (-2.0, 0.0, 0.0)
+RACK_POS = (-4.0, 0.0, 0.0)
 RACK_TOP_Z = 1.35
-RACK_APPROACH_X = -1.45
+RACK_APPROACH_X = -3.45
 RACK_APPROACH_Y = 0.0
 BOX_HEIGHT = 0.262248
 WINDOW_POS = (-1.0, 0.0, 0.0)
@@ -242,7 +242,7 @@ class FlightSceneCfg(InteractiveSceneCfg):
                 collision_enabled=True,
             ),
         ),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(-2.0, 0.0, 0.0)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=RACK_POS),
     )
     window: AssetBaseCfg = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Window",
