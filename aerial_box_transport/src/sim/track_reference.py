@@ -237,9 +237,16 @@ def main():
             torques[:, 0, :] = torch.tensor(tau_body, device=device, dtype=torques.dtype)
             robot.set_external_force_and_torque(forces, torques, body_ids=[0])
 
-            # follow the planned arm; at release, OPEN the grippers (command the pregrasp
-            # config) so the box is set down on the shelf instead of carried back.
-            arm_cmd = ref.arm[0] if rt >= RELEASE_START else q_arm_d
+            # follow the planned arm; at release, OPEN the grippers IN PLACE: keep the
+            # straight-down release pose (dof1 ~ pi/2) and only spread dof2-4, so the arm
+            # sets the box down and STAYS put -- instead of swinging forward to the level
+            # start pose (ref.arm[0] has dof1 = 0, which yanked the arm out in front).
+            if rt >= RELEASE_START:
+                arm_cmd = ref.arm[-1].copy()        # straight-down release pose (keeps dof1)
+                arm_cmd[1:4] = ref.arm[0][1:4]      # open the left jaw (dof2-4) in place
+                arm_cmd[5:8] = ref.arm[0][5:8]      # open the right jaw (dof2-4) in place
+            else:
+                arm_cmd = q_arm_d
             q_target = robot.data.default_joint_pos.clone()
             q_target[0, arm_ids] = torch.tensor(arm_cmd, device=device, dtype=q_target.dtype)
             robot.set_joint_position_target(q_target)
