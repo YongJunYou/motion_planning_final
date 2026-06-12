@@ -49,7 +49,7 @@ def theta_to_R_np(theta):
     return np.eye(3) + np.sin(ang) * K + (1.0 - np.cos(ang)) * (K @ K)
 
 
-def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
+def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=None):
     robot, task = load_config()
     c, sq, o = robot["contact"], robot["squeeze"], task["ocp"]
     g, m_o = task["gravity"], task["box"]["m_o"]
@@ -242,6 +242,37 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
         fn_set[k] = max(required_normal_force(m_o, max(a_z, 0.0), mu, g, 2) + sq["margin"],
                         sq["floor"])
 
+    # ---- KEYFRAME (optional through-config near the transport apex) -----------------------------
+    # The caller hands ONE full config (base pos in the home frame, a base pitch, a 4-DoF arm) the
+    # carry must PASS THROUGH (e.g. to thread the box through the awning window). Parsed UP-FRONT so
+    # the cost loop can (a) RELAX the level-attitude and box-under-base penalties around the apex --
+    # they actively fight a tilted, bent pose and were the root cause of the earlier divergence (the
+    # seed got "flattened" back and IPOPT ran away to base z=6 m) -- and (b) add a STRONG waypoint
+    # penalty pulling the config to the keyframe at the apex knot. A soft (not hard-equality) waypoint
+    # is used on purpose: a hard QR[k]==config equality overlaps the L/R-symmetry + parallel-jaw
+    # equalities already imposed at that knot (rank-deficient Jacobian -> IPOPT restoration failure).
+    kf = None
+    att_scale = np.ones(N + 1)
+    align_scale = np.ones(N + 1)
+    if keyframe is not None and len(tr) > 0:
+        d = np.asarray(keyframe["arm"], float)                       # [dof1, dof2, dof3, dof4] per arm
+        kf = {
+            "base": np.asarray(keyframe["base"], float),             # [x, y, z], home frame
+            "pitch": float(keyframe.get("pitch", 0.0)),              # rotation about world y [rad]
+            "arm": np.array([d[0], d[1], d[2], d[3], -d[0], d[1], d[2], d[3]]),  # mirrored L/R
+            "d": d,
+            "w_wp": float(keyframe.get("w_wp", 600.0)),              # waypoint penalty weight
+        }
+        kf["theta"] = np.array([0.0, kf["pitch"], 0.0])
+        # apex = the transport knot whose base-x GUESS is nearest the keyframe x (the carry naturally
+        # passes that lateral position then). base_ref during transport tracks the carried box.
+        tr_arr = np.array(tr)
+        kf["k_star"] = int(tr_arr[np.argmin(np.abs(base_ref[tr_arr + 1, 0] - kf["base"][0]))]) + 1
+        kf["sigma"] = max(2.0, 0.18 * len(tr))                       # apex bump width in knots
+        kf["bump"] = np.exp(-0.5 * ((np.arange(N + 1) - kf["k_star"]) / kf["sigma"]) ** 2)
+        att_scale = 1.0 - 0.98 * kf["bump"]      # ~0 attitude penalty at the apex (allow the tilt)
+        align_scale = 1.0 - 0.95 * kf["bump"]    # ~0 box-under-base penalty (allow the bent reach)
+
     def contact(qr, pb):
         pl, pr = wb.fk_ee(q_full(qr))
         lam_l = smooth_normal_force((pb[0] - pl[0]) - half, k_c, eps, backend=ca)
@@ -285,7 +316,16 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
         if ph in ("approach", "grasp"):
             opti.subject_to(PB[k] == pick)                        # rests on the pick-up support
         elif ph == "transport":
-            opti.subject_to(PB[k][0] == 0.5 * (pl[0] + pr[0]))    # box x at the EE midpoint
+            if kf is not None:
+                # TILTED-grip transport: the box is just the EE midpoint in FULL 3D. The default
+                # level-grip pinning (pl.z == pr.z == box.z, below) demands both pads share a height,
+                # which a pitched base CANNOT satisfy (the two pads, separated in x by the grip, split
+                # in z when the base tilts) -- that is exactly what made the keyframe solve infeasible
+                # (inf_pr frozen at 7.51). Tying the box to the midpoint instead lets the grip tilt
+                # with the base (the box has no modeled orientation, so the midpoint is the proxy).
+                opti.subject_to(PB[k] == 0.5 * (pl + pr))
+            else:
+                opti.subject_to(PB[k][0] == 0.5 * (pl[0] + pr[0]))    # box x at the EE midpoint
             opti.subject_to(lam_l >= fn_set[k])                   # slip-aware: enough squeeze to hold
             opti.subject_to(lam_r >= fn_set[k])
             for c in keep_out(PB[k]):                             # the box avoids desk/rack
@@ -300,7 +340,9 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
         # PB.z) in every gripping phase; the squeeze (lambda) presses them into the +-x faces.
         # So the OCP DISCOVERS the base + arm that reach these two pad targets, instead of
         # tracking a precomputed base_grasp / arm_grasp pose. (Box y,z then follow the pads.)
-        if ph in ("grasp", "transport", "release"):
+        # (transport under a keyframe uses the 3D midpoint tie above instead, to allow the tilt.)
+        _level_grip = ph in ("grasp", "transport", "release") and not (ph == "transport" and kf is not None)
+        if _level_grip:
             opti.subject_to(pl[1] == PB[k][1])                    # left pad at box face y
             opti.subject_to(pl[2] == PB[k][2])                    # left pad at box face z
             opti.subject_to(pr[1] == PB[k][1])                    # right pad at box face y
@@ -372,14 +414,23 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
         # this penalty on the horizontal box<->base offset, traded off against base_clear.
         # ALL phases: during the approach this also pulls the base toward over-the-box,
         # replacing the removed base_ref flight guide (so the approach flight is discovered).
-        cost += add("align", w_align * ((PB[k][0] - QR[k][0]) ** 2 + (PB[k][1] - QR[k][1]) ** 2))
+        cost += add("align", w_align * align_scale[k]
+                    * ((PB[k][0] - QR[k][0]) ** 2 + (PB[k][1] - QR[k][1]) ** 2))
 
-        cost += add("att", w_att * ca.sumsqr(QR[k][3:6]))         # attitude -> level
+        cost += add("att", w_att * att_scale[k] * ca.sumsqr(QR[k][3:6]))   # attitude -> level
         cost += add("reg_acc", w_reg_a * ca.sumsqr(AR[k]))
         cost += add("reg_vel", w_reg_v * ca.sumsqr(VR[k]))
 
+        # KEYFRAME waypoint: strong penalty pulling the apex config to the keyframe (base pos +
+        # pitch + arm). att/align are relaxed here (above) so this does not fight them.
+        if kf is not None and k == kf["k_star"]:
+            cost += add("waypoint", kf["w_wp"] * (
+                ca.sumsqr(QR[k][0:3] - kf["base"])
+                + ca.sumsqr(QR[k][3:6] - kf["theta"])
+                + ca.sumsqr(QR[k][6:14] - kf["arm"])))
+
     opti.subject_to(PB[N] == place)
-    cost += add("att", w_att * ca.sumsqr(QR[N][3:6]))
+    cost += add("att", w_att * att_scale[N] * ca.sumsqr(QR[N][3:6]))
     opti.minimize(cost)
 
     # record each named cost term per IPOPT iteration (diagnostic: which term drives / blows up the
@@ -411,51 +462,68 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
     arm_seed = np.array([arm_ref_ap[k] if phase_of[min(k, N - 1)] == "approach" else arm_grasp
                          for k in range(N + 1)])
 
-    # OPTIONAL keyframe seed (GENTLE, transport apex): the caller hands a single full config
-    # (base pos in the home frame, a base pitch, and a 4-DoF arm config) that the warm-start
-    # should pass THROUGH near the top of the carry. We do NOT add a constraint (the user asked
-    # for a seed only) -- we just blend the config into base_ref / theta_seed / arm_seed with a
-    # smooth Gaussian bump over the transport knots, then rebuild the velocity/accel guess from
-    # the blended base_ref so the seed stays dynamically consistent (a hard config injection with
-    # discontinuous velocities is exactly what makes IPOPT stall; the bump keeps it smooth). The
-    # arm config is mirrored L/R (dof1 opposite) so it respects the symmetry constraints, and a
-    # config with dof2-dof3-dof4 = 0 keeps the parallel-jaw constraint satisfied at the apex.
-    if keyframe is not None and len(tr) > 0:
-        kf_base = np.asarray(keyframe["base"], float)             # [x, y, z], home frame
-        kf_pitch = float(keyframe.get("pitch", 0.0))              # rotation about world y [rad]
-        d = np.asarray(keyframe["arm"], float)                    # [dof1, dof2, dof3, dof4]
-        kf_arm = np.array([d[0], d[1], d[2], d[3], -d[0], d[1], d[2], d[3]])
-        kf_theta = np.array([0.0, kf_pitch, 0.0])
-        # place the apex at the transport knot whose existing base-x guess is nearest the
-        # keyframe x (base_ref during transport tracks the carried box, so this is the natural
-        # time the carry passes through that lateral position).
-        tr_arr = np.array(tr)
-        k_star = int(tr_arr[np.argmin(np.abs(base_ref[tr_arr + 1, 0] - kf_base[0]))]) + 1
-        sigma = max(2.0, 0.18 * len(tr))                          # bump width in knots (~smooth)
+    # KEYFRAME warm-start: blend the keyframe config (parsed up-front into `kf`) into
+    # base_ref / theta_seed / arm_seed with the same smooth Gaussian apex bump, so the velocity/accel
+    # guess (rebuilt from base_ref below) stays dynamically consistent. The waypoint PENALTY + the
+    # apex att/align relaxation (both set up before the cost loop) do the actual pulling; this just
+    # gives IPOPT a warm start already near the tilted, bent apex pose so it converges there.
+    if kf is not None:
+        bump = kf["bump"]
         for k in range(N + 1):
-            w = float(np.exp(-0.5 * ((k - k_star) / sigma) ** 2))
+            w = float(bump[k])
             if w < 1e-3:
                 continue
-            base_ref[k] = (1.0 - w) * base_ref[k] + w * kf_base
-            theta_seed[k] = (1.0 - w) * theta_seed[k] + w * kf_theta
-            arm_seed[k] = (1.0 - w) * arm_seed[k] + w * kf_arm
+            base_ref[k] = (1.0 - w) * base_ref[k] + w * kf["base"]
+            theta_seed[k] = (1.0 - w) * theta_seed[k] + w * kf["theta"]
+            arm_seed[k] = (1.0 - w) * arm_seed[k] + w * kf["arm"]
         if verbose:
-            print(f"[OCP] keyframe seed at transport knot {k_star}/{N} (t={times[k_star]:.2f}s): "
-                  f"base={np.round(kf_base, 2).tolist()} pitch={np.degrees(kf_pitch):.0f}deg "
-                  f"arm(deg)={np.round(np.degrees(d), 0).tolist()}")
+            print(f"[OCP] keyframe apex at transport knot {kf['k_star']}/{N} "
+                  f"(t={times[kf['k_star']]:.2f}s): base={np.round(kf['base'], 2).tolist()} "
+                  f"pitch={np.degrees(kf['pitch']):.0f}deg "
+                  f"arm(deg)={np.round(np.degrees(kf['d']), 0).tolist()}  w_wp={kf['w_wp']:.0f}")
 
-    base_v = np.zeros((N + 1, 3))
-    base_v[:-1] = (base_ref[1:] - base_ref[:-1]) / dt
+    # FULLY-consistent kinematic seed: derive VR and AR from the WHOLE config seed (base + theta +
+    # arm), not just the base. The integration constraints are QR[k+1]=QR[k]+VR[k+1]*dt and
+    # VR[k+1]=VR[k]+AR[k]*dt, so VR[k]=(QR[k]-QR[k-1])/dt (VR[0]=0) and AR[k]=(VR[k+1]-VR[k])/dt.
+    # Previously only the 3 base-linear velocities were seeded and theta/arm velocities were left 0;
+    # with the keyframe apex bump the seeded theta/arm POSITIONS change but their velocities were 0,
+    # so the integration rows started violated by ~10 (inf_pr) and IPOPT fell into restoration and
+    # stalled. Seeding the matching velocities makes the start dynamically feasible.
+    q_seed = np.stack([np.concatenate([base_ref[k], theta_seed[k], arm_seed[k]])
+                       for k in range(N + 1)])
+    v_seed = np.zeros((N + 1, 14))
+    v_seed[1:] = (q_seed[1:] - q_seed[:-1]) / dt          # VR[k] = (QR[k]-QR[k-1])/dt, VR[0]=0
+    v_seed = np.clip(v_seed, -2.8, 2.8)                   # stay inside the |VR|<=3 box (else inf_pr)
+    a_seed = np.zeros((N, 14))
+    a_seed[:] = np.clip((v_seed[1:] - v_seed[:-1]) / dt, -20.0, 20.0)   # inside |AR|<=25
     for k in range(N + 1):
-        opti.set_initial(QR[k], np.concatenate([base_ref[k], theta_seed[k], arm_seed[k]]))
+        opti.set_initial(QR[k], q_seed[k])
         opti.set_initial(PB[k], box_guess[k])
-        opti.set_initial(VR[k], np.concatenate([base_v[k], np.zeros(11)]))
+        opti.set_initial(VR[k], v_seed[k])
     for k in range(N):
-        opti.set_initial(AR[k], np.concatenate([(base_v[k + 1] - base_v[k]) / dt, np.zeros(11)]))
+        opti.set_initial(AR[k], a_seed[k])
 
+    # HOMOTOPY warm start: override the constructed seed with a full prior solution (e.g. the
+    # baseline no-keyframe solve). That prior is already FEASIBLE for this (relaxed) problem, so
+    # IPOPT starts from feasibility and only has to slide toward the soft keyframe waypoint, instead
+    # of clawing out of the bad cold seed (which stalled in restoration at inf_pr 11.8 for ~900 iters).
+    if warm is not None:
+        for k in range(N + 1):
+            opti.set_initial(QR[k], warm["QR"][k])
+            opti.set_initial(VR[k], warm["VR"][k])
+            opti.set_initial(PB[k], warm["PB"][k])
+        for k in range(N):
+            opti.set_initial(AR[k], warm["AR"][k])
+
+    # IPOPT iteration log -> a FILE too (conda run buffers stdout, so the live progress of a long
+    # solve is otherwise invisible; tail results/ipopt_log.txt to watch it converge / diverge).
+    _ipopt_log = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir,
+                                              "results", "ipopt_log.txt"))
+    os.makedirs(os.path.dirname(_ipopt_log), exist_ok=True)
     opti.solver("ipopt", {"print_time": False},
-                {"max_iter": 5000, "tol": 1e-4, "acceptable_tol": 1e-3,
-                 "print_level": 5 if verbose else 0, "mu_strategy": "adaptive"})
+                {"max_iter": 3000, "tol": 1e-4, "acceptable_tol": 1e-3,
+                 "print_level": 5, "mu_strategy": "adaptive",
+                 "output_file": _ipopt_log, "file_print_level": 5, "print_frequency_iter": 10})
     try:
         sol = opti.solve()
         status = "solved"
@@ -472,6 +540,11 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
     base_omdot = np.array([val(AR[k])[3:6] for k in range(N)])
     arm = np.array([val(QR[k])[6:14] for k in range(N + 1)])
     box = np.array([val(PB[k]) for k in range(N + 1)])
+    # full raw decision-variable solution, for reuse as a HOMOTOPY warm start (solve_ocp(warm=...)).
+    sol_full = {"QR": np.array([val(QR[k]) for k in range(N + 1)]),
+                "VR": np.array([val(VR[k]) for k in range(N + 1)]),
+                "AR": np.array([val(AR[k]) for k in range(N)]),
+                "PB": box}
     lam = np.array([[float(val(contact(QR[k], PB[k])[2])),
                      float(val(contact(QR[k], PB[k])[3]))] for k in range(N)])
     # grippers are open and away from the box during approach: the 1D (x-only)
@@ -496,6 +569,7 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
         "lift": float(place[2] - pick[2]),
         "max_tilt_deg": float(np.degrees(np.max(np.linalg.norm(theta, axis=1)))),
         "cost_hist": cost_hist,
+        "sol": sol_full,
     }
 
 

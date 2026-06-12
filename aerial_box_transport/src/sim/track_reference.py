@@ -30,10 +30,16 @@ parser.add_argument("--ref", default=os.path.abspath(os.path.join(_THIS, os.pard
                                                                   "results", "ocp_reference.npz")))
 parser.add_argument("--out", default=os.path.abspath(os.path.join(_THIS, os.pardir, os.pardir,
                                                                   "results", "track_log.npz")))
+parser.add_argument("--fullscreen", action="store_true", help="open the Kit window full-screen")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
+
+if args_cli.fullscreen:
+    # toggle the Kit window full-screen (the box-through-window view fills the remote screen).
+    import carb  # noqa: E402
+    carb.settings.get_settings().set_bool("/app/window/fullscreen", True)
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
@@ -62,8 +68,10 @@ ARM_ORDER = [f"dof_{s}{i}" for s in ("l", "r") for i in range(1, 5)]
 DESK_USD = f"{_REPO}/surroundings/desk_01/desk_01_inst_base.usd"
 RACK_USD = f"{_REPO}/surroundings/rack_l01/rack_l01_inst_base.usd"
 BOX_USD = f"{_REPO}/box/cubebox_a01/cubebox_a01.usd"
+WINDOW_USD = f"{_REPO}/surroundings/awing_window.usd"   # awning window the box is threaded through
 DESK_POS = (2.0, 0.0, 0.0)
 RACK_POS = (-2.0, 0.0, 0.0)
+WINDOW_POS = (-1.0, 0.0, 0.0)   # teammate main.py: window centered between pick (+x) and place (-x)
 BOX_BASE_TO_CENTER = 0.079    # box prim origin at its base; center this far up (taller box 0.158/2)
 # pad inner-face contact point in the link4 body frame (matches the OCP EE), used to
 # read the ACTUAL gripper midpoint from the sim for debugging / closed-loop box attach.
@@ -107,6 +115,11 @@ class TrackSceneCfg(InteractiveSceneCfg):
                             variants={"PhysicsVariant": "RigidBody"},
                             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)),
                         init_state=AssetBaseCfg.InitialStateCfg(pos=RACK_POS))
+    # awning window the carried box must be threaded through (teammate main.py pose, collision ON).
+    window = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/Window",
+                          spawn=sim_utils.UsdFileCfg(usd_path=WINDOW_USD,
+                              collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)),
+                          init_state=AssetBaseCfg.InitialStateCfg(pos=WINDOW_POS))
     box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Box",
         spawn=sim_utils.UsdFileCfg(

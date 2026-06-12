@@ -50,8 +50,16 @@ def main():
     # the cylinder forces it back over x=place, so IPOPT's step computation fails. Like the sampler
     # hybrid (hybrid_seed_ocp.py), we drop the cylinders and keep only keep_out (real collision) +
     # the smooth costs, so the keyframe defines the carry shape and the OCP refines it.
+    # HOMOTOPY: solve the easy baseline first (no keyframe, level grip -> converges in ~60 s), then
+    # warm-start the keyframe solve from it. The baseline is feasible for the (relaxed, tilted-grip)
+    # keyframe problem, so IPOPT slides toward the keyframe waypoint from feasibility instead of
+    # stalling in restoration from a cold tilted seed.
     t0 = time.time()
-    res = solve_ocp(verbose=True, keyframe=keyframe, use_cylinders=False)
+    print("[keyframe] stage 1/2: baseline warm-start solve (no keyframe) ...")
+    base_res = solve_ocp(verbose=False, use_cylinders=False)
+    print(f"[keyframe] stage 1/2 done: {base_res['status']} ({time.time()-t0:.0f}s)")
+    print("[keyframe] stage 2/2: keyframe solve warm-started from baseline ...")
+    res = solve_ocp(verbose=True, keyframe=keyframe, use_cylinders=False, warm=base_res["sol"])
     dt = time.time() - t0
 
     rdir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "results"))
