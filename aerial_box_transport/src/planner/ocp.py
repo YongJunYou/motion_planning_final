@@ -49,7 +49,7 @@ def theta_to_R_np(theta):
     return np.eye(3) + np.sin(ang) * K + (1.0 - np.cos(ang)) * (K @ K)
 
 
-def solve_ocp(verbose=False):
+def solve_ocp(verbose=False, seed=None, use_cylinders=True):
     robot, task = load_config()
     c, sq, o = robot["contact"], robot["squeeze"], task["ocp"]
     g, m_o = task["gravity"], task["box"]["m_o"]
@@ -117,6 +117,11 @@ def solve_ocp(verbose=False):
     for k in range(N + 1):
         if phase_of[min(k, N - 1)] == "release":
             box_guess[k] = place
+    # HYBRID (gentle handoff): replace the hand-crafted up-and-over box_guess with the SAMPLER's
+    # discovered box route (the narrow-passage homotopy). base_ref / arm seed / velocities are then
+    # built consistently around it below, so IPOPT starts dynamically sane (unlike a raw config seed).
+    if seed is not None and "box" in seed:
+        box_guess = np.asarray(seed["box"], float).copy()
     box_ref_z = box_guess[:, 2]   # use the realistic (up-and-over) z for the slip-aware a_z
 
     # OBSTACLE keep-out (home frame = world - spawn z 1.5). Footprints inflated by body
@@ -314,9 +319,14 @@ def solve_ocp(verbose=False):
             opti.subject_to(c >= 0)
         for c in ee_clear(pl) + ee_clear(pr):                 # gripper pads stay above surfaces
             opti.subject_to(c >= 0)
-        # box rises / descends VERTICALLY in the pick / place cylinders (discovered up-over-down)
-        opti.subject_to(cylinder(PB[k], pick[0], pick[1], z_top_pick, +1.0) >= 0)
-        opti.subject_to(cylinder(PB[k], place[0], place[1], z_top_place, -1.0) >= 0)
+        # box rises / descends VERTICALLY in the pick / place cylinders (discovered up-over-down).
+        # In the HYBRID (use_cylinders=False) we DROP these: the sampler's box route already supplies
+        # the up-over-down homotopy, so the OCP needs only keep_out (real collision) + the costs. The
+        # cylinders are this OCP's own hand-crafted path-shaping device, incompatible with the sampler
+        # route, so seeding the cylinder-constrained OCP with that route makes IPOPT infeasible.
+        if use_cylinders:
+            opti.subject_to(cylinder(PB[k], pick[0], pick[1], z_top_pick, +1.0) >= 0)
+            opti.subject_to(cylinder(PB[k], place[0], place[1], z_top_place, -1.0) >= 0)
 
         if ph == "approach":
             # Hold the gripper OPEN (dof2-4) but leave dof1 FREE (arm-lowering discovered).
@@ -364,7 +374,10 @@ def solve_ocp(verbose=False):
 
     # seed the full kinematic guess (pos + vel + acc consistent with base_ref) so
     # IPOPT starts near the solution; with metre-scale flights a zero-velocity guess
-    # is too far and the solver fails restoration.
+    # is too far and the solver fails restoration. HYBRID: the sampler handoff (seed["box"]) is
+    # GENTLE -- it overrides only box_guess (the box route) earlier, so base_ref / arm seed /
+    # velocities below are built consistently around the sampler route. A raw full-config geometric
+    # seed instead fails (it violates the dynamics and the L/R symmetry; IPOPT stalls far from feasible).
     base_v = np.zeros((N + 1, 3))
     base_v[:-1] = (base_ref[1:] - base_ref[:-1]) / dt
     for k in range(N + 1):

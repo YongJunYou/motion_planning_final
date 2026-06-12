@@ -41,7 +41,11 @@
 - `src/model/`     전신 모델(`whole_body.py`, USD->Pinocchio), 평활 접촉(`contact.py`),
   박스/마찰콘(`box.py`), USD/그래스프 분석 도구
 - `src/planner/`   다단계 OCP(`ocp.py`), 미끄럼 인지 힘 법칙(`slip_aware.py`),
-  시간 이산화(`transcription.py`), OCP 문서 생성(`make_ocp_pdf.py`)
+  시간 이산화(`transcription.py`), OCP 문서 생성(`make_ocp_pdf.py`).
+  플래너 비교 연구: 샘플링 플래너 sweep(`sampling_compare.py`), grasp-constrained 운반
+  CBiRRT(`grasp_constrained.py`), 샘플 경로->트래커 변환(`sampling_to_reference.py`),
+  샘플->OCP 하이브리드(`hybrid_seed_ocp.py`), 비교 그림(`plot_compare.py`), OCP 시간측정
+  (`time_ocp.py`)
 - `src/sim/`       gRITE SE(3) 컨트롤러(`grite_controller.py`), IsaacSim 재생/검증
   (`track_reference.py`)
 - `src/baselines/`, `src/experiments/`  고정력 베이스라인, 가속도 스윕/헤드라인 플롯
@@ -49,7 +53,7 @@
 - `docs/`          `OCP_formulation.pdf` (비용 함수 + 제약조건 상세 설명, 한국어)
 - `results/`       생성 산출물(궤적 npz, 그림). git에는 포함되지 않음(재생성 가능)
 
-## 환경 (conda 2개)
+## 환경 (conda 3개)
 환경 자체(설치된 패키지 폴더)는 git에 올리지 않습니다(수 GB, 플랫폼 의존 바이너리).
 아래처럼 명세로부터 재생성하세요.
 
@@ -64,6 +68,12 @@
   **별도 설치**합니다(pip wheel 기반, 수 GB라 environment.yml로 재생성하지 않음). 이
   IsaacSim 씬을 만든 환경과 동일한 IsaacSim/IsaacLab을 쓰면 됩니다. 설치는 NVIDIA
   Isaac Sim / Isaac Lab 공식 문서를 참고하세요.
+- **`am_sampling`** (샘플링 비교): OMPL + Pinocchio. 샘플링 기반 플래너 비교용. 재생성:
+  ```
+  conda create -n am_sampling -c conda-forge python=3.11 pinocchio numpy scipy pyyaml matplotlib
+  conda run -n am_sampling pip install ompl casadi
+  ```
+  (conda-forge의 ompl에는 python 바인딩이 없어 PyPI 휠 `pip install ompl`을 씁니다.)
 
 ## IsaacSim 시뮬레이션 실행 (반복 재생 데모)
 `aerial_box_transport/` 디렉토리에서 두 단계로 실행합니다.
@@ -109,3 +119,35 @@ conda run -n am_dualarm python src/experiments/accel_sweep.py
 비용 함수와 모든 제약조건(접촉 모델, 패드-표적 파지, 박스-base 정렬 비용, 미끄럼 인지
 조건, 장애물 회피, base 클리어런스, 발견되는 수직 원기둥 경로 등)을 자세히 설명한 문서는
 `docs/OCP_formulation.pdf`에 있습니다.
+
+## 플래너 비교 연구 (OCP vs 샘플링 vs 하이브리드)
+같은 박스 운반 문제를 세 가지 방법으로 풀고 비교합니다(논문용). 충돌 기하는 세 방법이
+동일하게(OCP의 bounding-box keep-out) 봅니다.
+
+- **OCP** (`ocp.py`, am_dualarm): 동역학·접촉·정렬 cost를 한 번에 푸는 전역 최적화.
+  전체 시퀀스를 ~126초에 풀어 매끄럽고 외란 적은(<1°) 궤적 생성.
+- **샘플링** (am_sampling): 14-DoF whole-body C-space에서 충돌 없는 기하 경로 탐색.
+  - `sampling_compare.py --sweep`: OMPL 플래너 sweep. 운반 구간이 narrow passage라
+    단일트리 RRT는 실패(30%)하고 양방향(RRTConnect/BKPIECE/LBKPIECE)은 100% 성공.
+  - `grasp_constrained.py`: 물체를 든 채 자세를 바꿀 수 있도록 **파지 제약 manifold**
+    위에서 운반 계획(CBiRRT). 그립을 고정하지 않고 팔이 재배치됨. box-under-base cost를
+    Riemannian gradient descent로 후처리(method 5)하면 외란이 줄지만 ~16cm에서 바닥.
+  - `sampling_to_reference.py`: 샘플 경로를 트래커 레퍼런스(`results/sampling_reference.npz`)로
+    변환. `track_reference.py --ref` 로 IsaacSim에서 재생.
+- **하이브리드** (`hybrid_seed_ocp.py`, build@am_sampling -> solve@am_dualarm): 샘플러가
+  narrow passage 경로(homotopy)를 찾고, OCP가 그 box 경로로 warm-start돼 매끄러운 cost를
+  refine. 핵심: OCP의 cylinder 제약을 끄고(`use_cylinders=False`) box 경로만 seed해야
+  IPOPT가 수렴. 결과: 운반 중 box-base offset 0cm, tilt 0.43° (샘플링만 ~4-6° 대비).
+
+실행 예:
+```
+conda run -n am_sampling python src/planner/sampling_compare.py --sweep --timeout 20 --trials 10
+conda run -n am_sampling python src/planner/sampling_to_reference.py   # 샘플 경로 -> 레퍼런스
+conda run -n am_sampling python src/planner/hybrid_seed_ocp.py --stage build
+conda run -n am_dualarm  python src/planner/hybrid_seed_ocp.py --stage solve
+conda run -n am_isaac    python src/sim/track_reference.py --ref results/hybrid_reference.npz --loop
+```
+요약: narrow passage 탐색은 샘플링이, 매끄러운 nonlinear cost(정렬 등) 최소화는 OCP가
+유리하며, 하이브리드(샘플러 경로로 OCP warm-start)가 둘의 장점을 결합합니다. 단 하이브리드
+handoff는 plug-and-play가 아니라 formulation을 맞춰야 합니다(샘플러 경로가 OCP의 cylinder를
+대체, OCP가 자체 일관된 dynamic seed 생성).
