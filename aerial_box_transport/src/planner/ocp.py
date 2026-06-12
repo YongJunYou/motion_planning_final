@@ -174,6 +174,27 @@ def solve_ocp(verbose=False):
         return [p[2] + 1.5 * (1 - od) - (desk_surf + r_ee),    # pad sphere >= desk top
                 p[2] + 1.5 * (1 - orr) - (rack_surf + r_ee)]   # pad sphere >= rack shelf
 
+    # DISCOVERED up-over-down (NO path guide): the box CENTRE is confined to a narrow vertical
+    # CYLINDER above the pick, and above the place, for the first `cyl_h` of height -> it must
+    # rise / descend VERTICALLY there. Above the cylinder it is free, and keep_out makes it clear
+    # the rack, so the optimizer DISCOVERS up-over-down. Only the box is constrained (the arm /
+    # drone may be anywhere). Gated by the desk/rack FOOTPRINT and the HEIGHT (so the place
+    # cylinder is inactive at the pick). Smooth indicator + big-M, like keep_out.
+    cyl_r, cyl_M, cyl_h = 0.10, 25.0, 0.50
+    x_mid = 0.5 * (pick[0] + place[0])    # midpoint x; pick side is x > x_mid, place side x < x_mid
+    z_top_pick = desk_surf + cyl_h
+    z_top_place = rack_surf + cyl_h
+
+    def cylinder(p, cx, cy, z_top, side):
+        # Gate by which SIDE of the midpoint the box is on (NOT a radius): the gate stays ~1 across
+        # the whole narrow column, so the box cannot drift sideways out of it -- it must climb to
+        # z_top to be released. side=+1 -> pick side (x>x_mid); side=-1 -> place side.
+        gx = 0.5 * (1.0 + ca.tanh(side * (p[0] - x_mid) / 0.30))   # ~1 on this side of the midpoint
+        sz = 0.5 * (1.0 + ca.tanh((p[2] - z_top) / 0.04))         # ~0 below z_top, ~1 above
+        act = gx * (1.0 - sz)                                      # active: this side AND low
+        d2 = (p[0] - cx) ** 2 + (p[1] - cy) ** 2
+        return cyl_r ** 2 + cyl_M * (1.0 - act) - d2              # confine d2 <= cyl_r^2 when active
+
     # base reference path (guide + soft target). APPROACH is over-then-DOWN: home (the
     # spawn) is already ABOVE the box, so no climb is needed; just traverse at the start
     # height to directly OVER the grasp hover, then descend VERTICALLY onto the box. The
@@ -293,39 +314,34 @@ def solve_ocp(verbose=False):
             opti.subject_to(c >= 0)
         for c in ee_clear(pl) + ee_clear(pr):                 # gripper pads stay above surfaces
             opti.subject_to(c >= 0)
+        # box rises / descends VERTICALLY in the pick / place cylinders (discovered up-over-down)
+        opti.subject_to(cylinder(PB[k], pick[0], pick[1], z_top_pick, +1.0) >= 0)
+        opti.subject_to(cylinder(PB[k], place[0], place[1], z_top_place, -1.0) >= 0)
 
         if ph == "approach":
-            # Hold the gripper OPEN (dof2-4 at the wide pre-grasp gap) but leave dof1 FREE
-            # (arm-lowering is discovered, not prescribed).
+            # Hold the gripper OPEN (dof2-4) but leave dof1 FREE (arm-lowering discovered).
             cost += w_hold * (ca.sumsqr(QR[k][7:10] - arm_pre[1:4])     # left jaw stays open
                               + ca.sumsqr(QR[k][11:14] - arm_pre[5:8]))  # right jaw stays open
+            # NO base_ref tracking: the approach FLIGHT is DISCOVERED. The alignment cost (below,
+            # now all phases) pulls the base OVER the box and the grasp/EE constraints pull it
+            # down; base_ref survives only as the initial-guess SEED.
             if k in ap_descend:
-                # final approach: descend in z (base_ref guide) only; the box-under-base
-                # alignment cost (below) brings the base OVER the box.
-                cost += w_base * (QR[k][2] - base_ref[k][2]) ** 2
-                # Keep the OPEN gripper centred OVER the box (its pad MIDPOINT at the box x,y)
-                # as it descends, so the wide-open pads straddle the box and the close is a
-                # pure x-squeeze. Without this the open arm is still reaching FORWARD (dof1 not
-                # yet pi/2), so the pads sit in front of the box and SWEEP into it on closing
-                # (pushing it away). This forces the arm to fold straight down before the grasp.
+                # keep the OPEN gripper centred OVER the box during the descent so the wide pads
+                # straddle it and the close is a pure x-squeeze (no forward sweep that pushes it).
                 opti.subject_to(0.5 * (pl[0] + pr[0]) == PB[k][0])    # pad midpoint over box x
                 opti.subject_to(0.5 * (pl[1] + pr[1]) == PB[k][1])    # pad midpoint over box y
-            else:
-                cost += w_base * ca.sumsqr(QR[k][0:3] - base_ref[k])  # fly home -> over the box
         elif ph == "grasp":
             # base + arm are DISCOVERED to reach the pinned pad targets (above); no
             # base_grasp / arm_grasp tracking. Squeeze presses the pads into the +-x faces.
             cost += w_f * ((lam_l - o["squeeze_grasp"]) ** 2 + (lam_r - o["squeeze_grasp"]) ** 2)
             cost += w_sym * (lam_l - lam_r) ** 2
         elif ph == "transport":
-            # gentle up-and-over GUIDE for the box (time-paced, so the descent is trackable);
-            # the hard keep-out constraints above still GUARANTEE the box/drone clear the rack.
-            cost += w_box * ca.sumsqr(PB[k] - box_guess[k])
+            # NO box-path GUIDE: the up-over-down SHAPE is DISCOVERED from the pick/place
+            # cylinders + keep-out (above) + effort minimization -- not tracked to box_guess.
             # hold a FIRM squeeze while carrying (so the sim friction grip holds); the
             # slip-aware value stays enforced as the lower bound (lam >= fn_set above).
             cost += w_f * ((lam_l - o["squeeze_grasp"]) ** 2 + (lam_r - o["squeeze_grasp"]) ** 2)
             cost += w_sym * (lam_l - lam_r) ** 2
-            # arm DISCOVERED (pads pinned to the carried box above); no arm_grasp tracking.
         elif ph == "release":
             # base + arm DISCOVERED to hold the pads at the placed box; squeeze relaxed.
             cost += w_f * ((lam_l - sq["floor"]) ** 2 + (lam_r - sq["floor"]) ** 2)
@@ -335,8 +351,9 @@ def solve_ocp(verbose=False):
         # CoM and applies little disturbance torque on the (omnidirectional) base. NOT given
         # as a guide/waypoint -- the optimizer DISCOVERS the straight-down pick / carry from
         # this penalty on the horizontal box<->base offset, traded off against base_clear.
-        if (ph in ("grasp", "transport", "release")) or (k in ap_descend):
-            cost += w_align * ((PB[k][0] - QR[k][0]) ** 2 + (PB[k][1] - QR[k][1]) ** 2)
+        # ALL phases: during the approach this also pulls the base toward over-the-box,
+        # replacing the removed base_ref flight guide (so the approach flight is discovered).
+        cost += w_align * ((PB[k][0] - QR[k][0]) ** 2 + (PB[k][1] - QR[k][1]) ** 2)
 
         cost += w_att * ca.sumsqr(QR[k][3:6])                     # attitude -> level
         cost += w_reg_a * ca.sumsqr(AR[k]) + w_reg_v * ca.sumsqr(VR[k])
