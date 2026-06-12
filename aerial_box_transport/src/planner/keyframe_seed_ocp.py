@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pa
 
 import numpy as np  # noqa: E402
 
-from planner.ocp import plot_phases, solve_ocp  # noqa: E402
+from planner.ocp import plot_cost_breakdown, plot_phases, solve_ocp  # noqa: E402
 
 SPAWN_Z = 1.5    # drone spawn height [m]; home frame = world - spawn (matches config pick/place)
 DEG = np.pi / 180.0
@@ -61,6 +61,7 @@ def main():
              lam=res["lam"], fn_set=res["fn_set"], box_ref_z=res["box_ref_z"],
              box_ref=res["box_ref"], grite_ref=res["grite_ref"])
     plot_phases(res, os.path.join(rdir, "keyframe_phases.png"))
+    plot_cost_breakdown(res, os.path.join(rdir, "keyframe_cost_breakdown.png"))
 
     lam, ph = res["lam"], res["phase_of"]
     gm = lam[[k for k, p in enumerate(ph) if p == "grasp"]].mean()

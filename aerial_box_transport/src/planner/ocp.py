@@ -263,6 +263,15 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
     opti.subject_to(QR[0] == np.concatenate([home, [0, 0, 0], arm_start]))  # arm level, not down
     opti.subject_to(VR[0] == np.zeros(14))
 
+    # COST is accumulated into NAMED groups (att / align / reg_acc / reg_vel / force / sym / hold)
+    # so an IPOPT callback can record each term per iteration and we can graph which term drives the
+    # objective (and blows it up when it does). `cost` is the real total handed to minimize().
+    terms = {}
+
+    def add(name, expr):
+        terms[name] = terms.get(name, 0) + expr
+        return expr
+
     cost = 0
     for k in range(N):
         ph = phase_of[k]
@@ -330,8 +339,8 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
 
         if ph == "approach":
             # Hold the gripper OPEN (dof2-4) but leave dof1 FREE (arm-lowering discovered).
-            cost += w_hold * (ca.sumsqr(QR[k][7:10] - arm_pre[1:4])     # left jaw stays open
-                              + ca.sumsqr(QR[k][11:14] - arm_pre[5:8]))  # right jaw stays open
+            cost += add("hold", w_hold * (ca.sumsqr(QR[k][7:10] - arm_pre[1:4])     # left jaw open
+                              + ca.sumsqr(QR[k][11:14] - arm_pre[5:8])))  # right jaw stays open
             # NO base_ref tracking: the approach FLIGHT is DISCOVERED. The alignment cost (below,
             # now all phases) pulls the base OVER the box and the grasp/EE constraints pull it
             # down; base_ref survives only as the initial-guess SEED.
@@ -343,18 +352,18 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
         elif ph == "grasp":
             # base + arm are DISCOVERED to reach the pinned pad targets (above); no
             # base_grasp / arm_grasp tracking. Squeeze presses the pads into the +-x faces.
-            cost += w_f * ((lam_l - o["squeeze_grasp"]) ** 2 + (lam_r - o["squeeze_grasp"]) ** 2)
-            cost += w_sym * (lam_l - lam_r) ** 2
+            cost += add("force", w_f * ((lam_l - o["squeeze_grasp"]) ** 2 + (lam_r - o["squeeze_grasp"]) ** 2))
+            cost += add("sym", w_sym * (lam_l - lam_r) ** 2)
         elif ph == "transport":
             # NO box-path GUIDE: the up-over-down SHAPE is DISCOVERED from the pick/place
             # cylinders + keep-out (above) + effort minimization -- not tracked to box_guess.
             # hold a FIRM squeeze while carrying (so the sim friction grip holds); the
             # slip-aware value stays enforced as the lower bound (lam >= fn_set above).
-            cost += w_f * ((lam_l - o["squeeze_grasp"]) ** 2 + (lam_r - o["squeeze_grasp"]) ** 2)
-            cost += w_sym * (lam_l - lam_r) ** 2
+            cost += add("force", w_f * ((lam_l - o["squeeze_grasp"]) ** 2 + (lam_r - o["squeeze_grasp"]) ** 2))
+            cost += add("sym", w_sym * (lam_l - lam_r) ** 2)
         elif ph == "release":
             # base + arm DISCOVERED to hold the pads at the placed box; squeeze relaxed.
-            cost += w_f * ((lam_l - sq["floor"]) ** 2 + (lam_r - sq["floor"]) ** 2)
+            cost += add("force", w_f * ((lam_l - sq["floor"]) ** 2 + (lam_r - sq["floor"]) ** 2))
 
         # BOX-UNDER-BASE alignment (soft): keep the carried object's centre on the vertical
         # line (global z) through the base centre, so the load barely shifts the whole-body
@@ -363,14 +372,31 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
         # this penalty on the horizontal box<->base offset, traded off against base_clear.
         # ALL phases: during the approach this also pulls the base toward over-the-box,
         # replacing the removed base_ref flight guide (so the approach flight is discovered).
-        cost += w_align * ((PB[k][0] - QR[k][0]) ** 2 + (PB[k][1] - QR[k][1]) ** 2)
+        cost += add("align", w_align * ((PB[k][0] - QR[k][0]) ** 2 + (PB[k][1] - QR[k][1]) ** 2))
 
-        cost += w_att * ca.sumsqr(QR[k][3:6])                     # attitude -> level
-        cost += w_reg_a * ca.sumsqr(AR[k]) + w_reg_v * ca.sumsqr(VR[k])
+        cost += add("att", w_att * ca.sumsqr(QR[k][3:6]))         # attitude -> level
+        cost += add("reg_acc", w_reg_a * ca.sumsqr(AR[k]))
+        cost += add("reg_vel", w_reg_v * ca.sumsqr(VR[k]))
 
     opti.subject_to(PB[N] == place)
-    cost += w_att * ca.sumsqr(QR[N][3:6])
+    cost += add("att", w_att * ca.sumsqr(QR[N][3:6]))
     opti.minimize(cost)
+
+    # record each named cost term per IPOPT iteration (diagnostic: which term drives / blows up the
+    # objective). opti.debug.value(expr) evaluates at the current iterate inside the callback.
+    cost_hist = {name: [] for name in terms}
+    cost_hist["total"] = []
+    _term_exprs = dict(terms)
+
+    def _record_costs(i):
+        try:
+            cost_hist["total"].append(float(opti.debug.value(cost)))
+            for nm, ex in _term_exprs.items():
+                cost_hist[nm].append(float(opti.debug.value(ex)))
+        except Exception:
+            pass
+
+    opti.callback(_record_costs)
 
     # seed the full kinematic guess (pos + vel + acc consistent with base_ref) so
     # IPOPT starts near the solution; with metre-scale flights a zero-velocity guess
@@ -469,7 +495,55 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None):
         "home": home, "grite_ref": grite_ref, "place_delta": place - pick,
         "lift": float(place[2] - pick[2]),
         "max_tilt_deg": float(np.degrees(np.max(np.linalg.norm(theta, axis=1)))),
+        "cost_hist": cost_hist,
     }
+
+
+def plot_cost_breakdown(res, path):
+    """Graph each named cost term vs IPOPT iteration (log y), so the term that drives -- or blows
+    up -- the objective is obvious. Prints the final-iterate ranking too."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    h = res.get("cost_hist", {})
+    total = h.get("total", [])
+    if not total:
+        print("[cost] no cost history recorded (solver took 0 iterations?)")
+        return
+    it = np.arange(len(total))
+    terms = [k for k in h if k != "total" and len(h[k]) == len(total)]
+    terms.sort(key=lambda k: -(h[k][-1] if h[k] else 0.0))   # largest final term first
+
+    fig, ax = plt.subplots(2, 1, figsize=(9, 9))
+    ax[0].plot(it, total, "k-", lw=2.5, label="TOTAL")
+    for nm in terms:
+        ax[0].plot(it, h[nm], lw=1.6, label=nm)
+    ax[0].set_yscale("symlog")
+    ax[0].set_xlabel("IPOPT iteration")
+    ax[0].set_ylabel("cost contribution")
+    ax[0].set_title(f"OCP cost breakdown ({res.get('status','?')})  -- final total = {total[-1]:.3e}")
+    ax[0].legend(loc="upper right", fontsize=8, ncol=2)
+    ax[0].grid(alpha=0.3)
+
+    finals = [(nm, (h[nm][-1] if h[nm] else 0.0)) for nm in terms]
+    names = [f"{nm}\n{v:.2e}" for nm, v in finals]
+    ax[1].bar(range(len(finals)), [max(v, 1e-12) for _, v in finals], color="C1")
+    ax[1].set_yscale("log")
+    ax[1].set_xticks(range(len(finals)))
+    ax[1].set_xticklabels(names, fontsize=8)
+    ax[1].set_ylabel("final-iterate cost")
+    ax[1].set_title("Final cost per term (dominant term = the one to relax/constrain)")
+    ax[1].grid(alpha=0.3, axis="y")
+    fig.tight_layout()
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+
+    print(f"[cost] final term ranking ({res.get('status','?')}):")
+    for nm, v in finals:
+        print(f"[cost]   {nm:10s} = {v:.4e}")
+    print(f"[cost]   {'TOTAL':10s} = {total[-1]:.4e}")
+    print(f"[cost] figure -> {path}")
 
 
 def plot_phases(res, path):
@@ -523,6 +597,7 @@ def main():
              lam=res["lam"], fn_set=res["fn_set"], box_ref_z=res["box_ref_z"],
              box_ref=res["box_ref"], grite_ref=res["grite_ref"])
     plot_phases(res, os.path.join(rdir, "ocp_phases.png"))
+    plot_cost_breakdown(res, os.path.join(rdir, "ocp_cost_breakdown.png"))
     lam, ph = res["lam"], res["phase_of"]
     gm = lam[[k for k, p in enumerate(ph) if p == "grasp"]].mean()
     tm = lam[[k for k, p in enumerate(ph) if p == "transport"]].mean()
