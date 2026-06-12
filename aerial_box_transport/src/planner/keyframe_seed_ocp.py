@@ -32,8 +32,12 @@ DEG = np.pi / 180.0
 def main():
     # --- keyframe config (edit here) ---------------------------------------------------------
     pos_world = np.array([-0.74, 0.0, 2.15])             # base position, WORLD frame [m]
-    pitch_deg = 60.0                                     # base pitch (about world y) [deg]
-    arm_deg = np.array([0.0, 150.0, 90.0, 60.0])         # [dof1, dof2, dof3, dof4] per arm [deg]
+    # pitch is about the BODY X axis (forward = body -y; pitch tilts that forward up/down). NEGATIVE
+    # here = NOSE-UP, which lifts the forward-carried box toward the elevated window. (Flip the sign
+    # if the tilt looks backwards in the sim.)
+    pitch_deg = -60.0                                    # base pitch about body x [deg], nose-up
+    arm_deg = np.array([0.0, 150.0, 90.0, 60.0])         # arm SEED only (NOT referenced/forced)
+    USE_WINDOW = True    # add the window collision stage (box threads the opening z in [2.06, 3.07])
     # ----------------------------------------------------------------------------------------
 
     kf_base = pos_world - np.array([0.0, 0.0, SPAWN_Z])  # -> home frame: (-0.74, 0, 0.65)
@@ -55,11 +59,23 @@ def main():
     # keyframe problem, so IPOPT slides toward the keyframe waypoint from feasibility instead of
     # stalling in restoration from a cold tilted seed.
     t0 = time.time()
-    print("[keyframe] stage 1/2: baseline warm-start solve (no keyframe) ...")
+    print("[keyframe] stage 1/3: baseline warm-start solve (no keyframe) ...")
     base_res = solve_ocp(verbose=False, use_cylinders=False)
-    print(f"[keyframe] stage 1/2 done: {base_res['status']} ({time.time()-t0:.0f}s)")
-    print("[keyframe] stage 2/2: keyframe solve warm-started from baseline ...")
-    res = solve_ocp(verbose=True, keyframe=keyframe, use_cylinders=False, warm=base_res["sol"])
+    print(f"[keyframe] stage 1/3 done: {base_res['status']} ({time.time()-t0:.0f}s)")
+    print("[keyframe] stage 2/3: keyframe solve warm-started from baseline ...")
+    kf_res = solve_ocp(verbose=False, keyframe=keyframe, use_cylinders=False, warm=base_res["sol"])
+    print(f"[keyframe] stage 2/3 done: {kf_res['status']} (tilt {kf_res['max_tilt_deg']:.0f}deg, "
+          f"{time.time()-t0:.0f}s)")
+    # stage 3: add the WINDOW collision constraint (box must thread the opening), warm-started from
+    # the converged keyframe trajectory (which already grazes the opening), so IPOPT only nudges the
+    # carry to clear the wall instead of discovering the threading cold.
+    if USE_WINDOW:
+        print("[keyframe] stage 3/3: + window collision constraint, warm-started from keyframe ...")
+        res = solve_ocp(verbose=True, keyframe=keyframe, use_cylinders=False, window=True,
+                        warm=kf_res["sol"])
+    else:
+        print("[keyframe] stage 3/3 SKIPPED (USE_WINDOW=False); using the keyframe trajectory.")
+        res = kf_res
     dt = time.time() - t0
 
     rdir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "results"))

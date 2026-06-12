@@ -153,7 +153,18 @@ class Reference:
         v_d = np.array([np.interp(t, self.tg, self.gr[:, 3 + i]) for i in range(3)])
         a_d = np.array([np.interp(t, self.tg, self.gr[:, 6 + i]) for i in range(3)])
         q_arm = np.array([np.interp(t, self.t, self.arm[:, i]) for i in range(8)])
-        return p_d, v_d, a_d, q_arm
+        # DESIRED ATTITUDE from the reference (grite_ref cols 12..20 = base rotation matrix R,
+        # flattened column-major; cols 21..23 = body angular velocity). Without this the controller
+        # was commanded R_d=I (level) forever, so the planned 60deg tilt never showed in the sim.
+        R_cols = np.array([np.interp(t, self.tg, self.gr[:, 12 + i]) for i in range(9)])
+        R_d = R_cols.reshape(3, 3, order="F")
+        u, _, vt = np.linalg.svd(R_d)          # re-orthonormalize (elementwise interp drifts slightly)
+        R_d = u @ vt
+        if np.linalg.det(R_d) < 0:             # guard against a reflection
+            u[:, -1] *= -1
+            R_d = u @ vt
+        omega_d = np.array([np.interp(t, self.tg, self.gr[:, 21 + i]) for i in range(3)])
+        return p_d, v_d, a_d, q_arm, R_d, omega_d
 
     def box_prim_at(self, t):
         """World pose [pos3, quat_wxyz] of the box PRIM (origin at its base)."""
@@ -202,8 +213,6 @@ def main():
     scene.reset()
     print(f"[INFO] mass={m_total:.3f} kg, arm ids={arm_ids}, ref horizon={ref.t[-1]:.1f}s")
 
-    R_d = np.eye(3)
-    omega_d = np.zeros(3)
     log = {"t": [], "p": [], "p_d": [], "tilt_deg": [], "arm_err": [],
            "ee_mid": [], "box_set": []}
     t, count = 0.0, 0
@@ -226,7 +235,7 @@ def main():
                 reset_scene()
                 t = 0.0
             rt = t
-            p_d, v_d, a_d, q_arm_d = ref.at(rt)
+            p_d, v_d, a_d, q_arm_d, R_d, omega_d = ref.at(rt)
 
             p = robot.data.root_pos_w[0].cpu().numpy()
             quat = robot.data.root_quat_w[0]

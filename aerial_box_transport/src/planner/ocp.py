@@ -49,7 +49,7 @@ def theta_to_R_np(theta):
     return np.eye(3) + np.sin(ang) * K + (1.0 - np.cos(ang)) * (K @ K)
 
 
-def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=None):
+def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=None, window=None):
     robot, task = load_config()
     c, sq, o = robot["contact"], robot["squeeze"], task["ocp"]
     g, m_o = task["gravity"], task["box"]["m_o"]
@@ -200,6 +200,33 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
         d2 = (p[0] - cx) ** 2 + (p[1] - cy) ** 2
         return cyl_r ** 2 + cyl_M * (1.0 - act) - d2              # confine d2 <= cyl_r^2 when active
 
+    # AWNING WINDOW (the box must thread the opening). The wall normal is world x (teammate places
+    # awing_window.usd at world (-1,0,0)); the opening is lateral world y in [-y_half, y_half] and
+    # vertical from a sill up to z_top (world 2.06), with a slanted awning above. We DON'T model the
+    # slant analytically yet -- we keep the box BELOW z_top (so it passes under the slant) and within
+    # the lateral opening WHENEVER it is inside the wall slab (smooth gate gx ~1 near x_w). Same
+    # big-M + smooth-indicator idiom as keep_out: each returned expr must be >= 0. All in HOME frame.
+    # opening spans world z in [z_bot=2.06, z_top=3.07] (the slanted awning gap) and lateral
+    # y in [-y_half, y_half]; the box must be INSIDE that rectangle when crossing the wall slab.
+    WIN = {"x": -1.0, "half_thick": 0.025, "y_half": 0.865,
+           "z_bot": 2.060 - 1.5, "z_top": 3.068 - 1.5, "clear": 0.04, "M": 6.0, "approach": 0.18}
+    if isinstance(window, dict):
+        WIN.update(window)
+
+    def window_clear(p, obj_half):
+        # gate ~1 while p.x is inside the wall slab (+ an approach margin so the squeeze into the
+        # opening is gradual, not a step at the wall). Outside the slab the big-M slackens every row.
+        gx = sind(p[0], WIN["x"] - WIN["half_thick"] - WIN["approach"],
+                  WIN["x"] + WIN["half_thick"] + WIN["approach"])
+        yh = WIN["y_half"] - obj_half - WIN["clear"]
+        zt = WIN["z_top"] - obj_half - WIN["clear"]
+        zb = WIN["z_bot"] + obj_half + WIN["clear"]
+        slack = WIN["M"] * (1.0 - gx)
+        return [(yh - p[1]) + slack,        # y <= +yh near the wall (within the opening, laterally)
+                (p[1] + yh) + slack,        # y >= -yh
+                (zt - p[2]) + slack,         # z <= opening top (below the slant top line)
+                (p[2] - zb) + slack]         # z >= opening bottom (above z=2.06)
+
     # base reference path (guide + soft target). APPROACH is over-then-DOWN: home (the
     # spawn) is already ABOVE the box, so no climb is needed; just traverse at the start
     # height to directly OVER the grasp hover, then descend VERTICALLY onto the box. The
@@ -263,7 +290,12 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
             "d": d,
             "w_wp": float(keyframe.get("w_wp", 600.0)),              # waypoint penalty weight
         }
-        kf["theta"] = np.array([0.0, kf["pitch"], 0.0])
+        # PITCH is about the BODY X axis: the drone's forward is body -y, and pitch tilts that
+        # forward direction up/down -> rotation about the lateral (x) axis, NOT world y. Pitching
+        # about x keeps the two grippers (separated in x) at EQUAL z, so the level grip stays valid
+        # (pitching about y split them in z and made the solve infeasible). Sign: nose-up lifts the
+        # forward-carried box toward the elevated window.
+        kf["theta"] = np.array([kf["pitch"], 0.0, 0.0])
         # apex = the transport knot whose base-x GUESS is nearest the keyframe x (the carry naturally
         # passes that lateral position then). base_ref during transport tracks the carried box.
         tr_arr = np.array(tr)
@@ -332,6 +364,11 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
                 opti.subject_to(c >= 0)
             for c in keep_out(QR[k][0:3]):                        # the drone body avoids them too
                 opti.subject_to(c >= 0)
+            if window is not None:
+                for c in window_clear(PB[k], box_half):           # box threads the window opening
+                    opti.subject_to(c >= 0)
+                for c in window_clear(QR[k][0:3], 0.20):          # drone body clears the wall too
+                    opti.subject_to(c >= 0)
         elif ph == "release":
             opti.subject_to(PB[k] == place)                       # placed on the shelf
 
@@ -424,10 +461,12 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
         # KEYFRAME waypoint: strong penalty pulling the apex config to the keyframe (base pos +
         # pitch + arm). att/align are relaxed here (above) so this does not fight them.
         if kf is not None and k == kf["k_star"]:
+            # base POSITION + ATTITUDE only. The ARM is NOT referenced: forcing the arm joints to a
+            # fixed config fights the grasp pinning and makes the sim drop the box. The arm is left
+            # free to whatever holds the grip while the base reaches the through-window pose.
             cost += add("waypoint", kf["w_wp"] * (
                 ca.sumsqr(QR[k][0:3] - kf["base"])
-                + ca.sumsqr(QR[k][3:6] - kf["theta"])
-                + ca.sumsqr(QR[k][6:14] - kf["arm"])))
+                + ca.sumsqr(QR[k][3:6] - kf["theta"])))
 
     opti.subject_to(PB[N] == place)
     cost += add("att", w_att * att_scale[N] * ca.sumsqr(QR[N][3:6]))
@@ -475,7 +514,8 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
                 continue
             base_ref[k] = (1.0 - w) * base_ref[k] + w * kf["base"]
             theta_seed[k] = (1.0 - w) * theta_seed[k] + w * kf["theta"]
-            arm_seed[k] = (1.0 - w) * arm_seed[k] + w * kf["arm"]
+            # NOTE: the arm is NOT blended toward the keyframe arm -- it is left at the natural grasp
+            # seed so it is free to hold the grip (a forced arm config drops the box).
         if verbose:
             print(f"[OCP] keyframe apex at transport knot {kf['k_star']}/{N} "
                   f"(t={times[kf['k_star']]:.2f}s): base={np.round(kf['base'], 2).tolist()} "
