@@ -29,14 +29,27 @@ ocp:
   #   box on the desk at world (2,0,0.838 center)  -> pick = box - spawn = (2,0,-0.662)
   #   place on the rack 1.31 m shelf at world (-2,0,1.365) -> place = (-2,0,-0.135)
   pick:  [2.0, 0.0, -0.636]   # box CENTRE on the desk (+x); taller box -> centre at world (2,0,0.864)
-  place: [-2.0, 0.0, 0.489]   # rack TOP shelf (z~1.91): taller box CENTRE at world (-2,0,1.989)
+  place: [-4.0, 0.0, 0.489]   # rack TOP shelf (z~1.91); rack moved -2 -> -4 in x (further from wall)
+  #                             so the drone exits the window and flies clear before placing
   place_rise: 0.6             # only the initial GUESS climbs this high; the actual path is
   #                            DISCOVERED by the obstacle keep-out constraints below.
   # Obstacle bounding boxes (world coords). The box center must stay above `top` (+ box
   # half-height) whenever it is over the x-y footprint -> the OCP discovers up-and-over.
   obstacles:
     desk: {x: [1.68, 2.32], y: [-0.96, 0.96], top: 0.781}   # desk top surface
-    rack: {x: [-2.35, -1.65], y: [-0.80, 0.80], top: 1.91}  # rack top shelf (the landing)
+    rack: {x: [-4.35, -3.65], y: [-0.80, 0.80], top: 1.91}  # rack top shelf (moved -2 in x: further from wall)
+    # teammate's awning window (main branch) at world (-1,0,0). A 4x4 m wall, SOLID except the
+    # opening, plus two awning panes (hinged at top, tilted ~33 deg) sticking out toward the desk
+    # side. The box+arm+base must thread the opening past the slanted panes -> requires whole-body
+    # reconfiguration / box tilt. All coords are WORLD (planner subtracts spawn z 1.5 for the home frame).
+    window:                          # CAD-accurate values from the teammate. All WORLD coords
+      #                                (planner subtracts spawn z 1.5 for the home frame).
+      wall_x:    [-1.10, -1.00]       # solid wall slab in x (spans y[-2,2], z[0,4]) except the opening
+      opening_y: [-0.89,  0.89]       # opening width = sash width 1.78 m
+      opening_z: [2.060, 3.068]       # opening bottom 2060 mm, top (hinge) 3068 mm
+      sash: {hinge_x: -1.00, hinge_z: 3.068, tilt_deg: 32.4, slant: 1.168, width: 1.780, thickness: 0.0411}
+      #     awning sash as a single tilted slab: hinged at the top edge (wall front face), opens toward
+      #     +x (drone side) and down at 32.4 deg from vertical; bottom edge ends at x=-0.374, z=2.082.
   half_extent: 0.0525               # half the grasped (x) box dimension [m] (10.5 cm box)
   # Arm configs are [dof1, dof2, dof3, dof4]. dof1 (applied with OPPOSITE sign on the two arms)
   # tilts both arms DOWN ~27 cm so the pads reach the box while the BASE hovers ~33 cm above the

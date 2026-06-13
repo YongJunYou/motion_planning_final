@@ -28,8 +28,14 @@ parser.add_argument("--ref", default=os.path.abspath(os.path.join(_THIS, os.pard
                                                                   "results", "ocp_reference.npz")))
 parser.add_argument("--out", default=os.path.abspath(os.path.join(_THIS, os.pardir, os.pardir,
                                                                   "results", "track_log.npz")))
+parser.add_argument("--record", default="", help="record a video to this mp4 (headless, one pass)")
+parser.add_argument("--fps", type=int, default=30)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.record:                       # recording needs offscreen rendering, no GUI window, one pass
+    args_cli.headless = True
+    args_cli.enable_cameras = True
+    args_cli.loop = False
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
@@ -62,7 +68,12 @@ DESK_USD = f"{_REPO}/surroundings/desk_01/desk_01_inst_base.usd"
 RACK_USD = f"{_REPO}/surroundings/rack_l01/rack_l01_inst_base.usd"
 BOX_USD = f"{_REPO}/box/cubebox_a01/cubebox_a01.usd"
 DESK_POS = (2.0, 0.0, 0.0)
-RACK_POS = (-2.0, 0.0, 0.0)
+RACK_POS = (-4.0, 0.0, 0.0)
+# teammate's awning window (main branch, surroundings/awing_window.usd). World pose (-1,0,0): a 4x4 m
+# wall (x~-1.0..-1.1, y[-2,2], z[0,4]) solid EXCEPT the opening y[-0.93,0.92] z[2.0,3.24]; two awning
+# panes hinged at top, tilted ~33 deg, sticking out toward +x to x~-0.38 over z[2.1,3.1].
+WINDOW_USD = f"{_REPO}/surroundings/awing_window.usd"
+WINDOW_POS = (-1.0, 0.0, 0.0)
 BOX_BASE_TO_CENTER = 0.079    # box prim origin at its base; center this far up (taller box 0.158/2)
 # pad inner-face contact point in the link4 body frame (matches the OCP EE), used to
 # read the ACTUAL gripper midpoint from the sim for debugging / closed-loop box attach.
@@ -106,6 +117,12 @@ class TrackSceneCfg(InteractiveSceneCfg):
                             variants={"PhysicsVariant": "RigidBody"},
                             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)),
                         init_state=AssetBaseCfg.InitialStateCfg(pos=RACK_POS))
+    # teammate's awning window. COLLISION ON: validates that the planned window-passing trajectory
+    # actually clears the wall + sash. (The planner's window keep-out is what shapes the trajectory.)
+    window = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/Window",
+                          spawn=sim_utils.UsdFileCfg(usd_path=WINDOW_USD,
+                              collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)),
+                          init_state=AssetBaseCfg.InitialStateCfg(pos=WINDOW_POS))
     box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Box",
         spawn=sim_utils.UsdFileCfg(
@@ -132,6 +149,11 @@ class Reference:
         self.box = d["box"]                 # (M,3) box CENTER in the OCP/home frame
         self.tg = self.t[:len(self.gr)]
         self.spawn = np.asarray(SPAWN)
+        # phase boundary times: read from the reference (so a re-planned / slowed transport stays
+        # consistent), else fall back to the desk->rack defaults.
+        pb = d["phase_bounds"] if "phase_bounds" in d.files else None
+        self.transport_start = float(pb[1]) if pb is not None else TRANSPORT_START
+        self.release_start = float(pb[2]) if pb is not None else RELEASE_START
 
     def at(self, t):
         t = float(np.clip(t, self.t[0], self.t[-1]))
@@ -139,7 +161,17 @@ class Reference:
         v_d = np.array([np.interp(t, self.tg, self.gr[:, 3 + i]) for i in range(3)])
         a_d = np.array([np.interp(t, self.tg, self.gr[:, 6 + i]) for i in range(3)])
         q_arm = np.array([np.interp(t, self.t, self.arm[:, i]) for i in range(8)])
-        return p_d, v_d, a_d, q_arm
+        # planned base attitude: R columns = grite_ref[12:21] (column-major), omega = [21:24].
+        # interpolate element-wise, then re-orthonormalize (SVD) to the nearest proper rotation.
+        Rcol = np.array([np.interp(t, self.tg, self.gr[:, 12 + i]) for i in range(9)])
+        U, _, Vt = np.linalg.svd(Rcol.reshape(3, 3, order="F"))
+        R_d = U @ Vt
+        if np.linalg.det(R_d) < 0:
+            U[:, -1] *= -1.0
+            R_d = U @ Vt
+        omega_d = np.array([np.interp(t, self.tg, self.gr[:, 21 + i]) for i in range(3)])
+        omega_d_dot = np.array([np.interp(t, self.tg, self.gr[:, 24 + i]) for i in range(3)])  # gRITE ff
+        return p_d, v_d, a_d, q_arm, R_d, omega_d, omega_d_dot
 
     def box_prim_at(self, t):
         """World pose [pos3, quat_wxyz] of the box PRIM (origin at its base)."""
@@ -149,15 +181,51 @@ class Reference:
         return np.concatenate([pos, [1.0, 0.0, 0.0, 0.0]])
 
 
+def spawn_window_proxy():
+    """Spawn the planner's window keep-out volumes (4 wall borders + tilted sash) as SOLID static
+    colliders. The teammate's window USD has NO colliders, so without this the drone/box would pass
+    through the wall in physics. Semi-transparent red so the real collision volumes are visible. World
+    coords come from /tmp/window_ocp_play.npz (export_play), matching the planner's window geometry."""
+    if not os.path.exists("/tmp/window_ocp_play.npz"):
+        print("[WARN] no /tmp/window_ocp_play.npz -> no window colliders")
+        return
+    d = np.load("/tmp/window_ocp_play.npz")
+    full, cen, quat = d["proxy_full"], d["proxy_cen"], d["proxy_quat"]
+    for i in range(len(full)):
+        cfg = sim_utils.CuboidCfg(
+            size=tuple(float(v) for v in full[i]),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.85, 0.12, 0.12), opacity=0.30))
+        cfg.func(f"/World/WinProxy/box_{i}", cfg,
+                 translation=tuple(float(v) for v in cen[i]),
+                 orientation=tuple(float(v) for v in quat[i]))
+    print(f"[INFO] spawned {len(full)} window collision volumes (solid, semi-transparent)")
+
+
 def main():
     sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(device=args_cli.device, dt=1.0 / 200.0))
-    sim.set_camera_view(eye=[2.5, 2.5, 2.0], target=[0.0, 0.0, 1.6])
+    sim.set_camera_view(eye=[2.6, -4.0, 2.6], target=[-0.8, 0.0, 1.6])
     scene = InteractiveScene(TrackSceneCfg(num_envs=1, env_spacing=4.0))
+    spawn_window_proxy()
+    camera = None
+    if args_cli.record:
+        from isaaclab.sensors import Camera, CameraCfg
+        camera = Camera(CameraCfg(
+            prim_path="/World/RecordCam", height=720, width=1280, data_types=["rgb"],
+            spawn=sim_utils.PinholeCameraCfg(focal_length=18.0, clipping_range=(0.05, 1e5)),
+            update_period=0,
+            offset=CameraCfg.OffsetCfg(pos=(2.6, -4.0, 2.6), rot=(1.0, 0.0, 0.0, 0.0),
+                                       convention="world")))
     sim.reset()
     robot: Articulation = scene["robot"]
     box: RigidObject = scene["box"]
     device = robot.device
     sim_dt = sim.get_physics_dt()
+    rec_frames = []
+    rec_every = max(1, round((1.0 / sim_dt) / args_cli.fps))   # capture stride for ~fps video
+    if camera is not None:
+        camera.set_world_poses_from_view(torch.tensor([[2.6, -4.0, 2.6]], device=device),
+                                         torch.tensor([[-0.8, 0.0, 1.6]], device=device))
 
     ref = Reference(args_cli.ref)
     arm_ids = [int(robot.find_joints(n)[0][0]) for n in ARM_ORDER]
@@ -188,8 +256,6 @@ def main():
     scene.reset()
     print(f"[INFO] mass={m_total:.3f} kg, arm ids={arm_ids}, ref horizon={ref.t[-1]:.1f}s")
 
-    R_d = np.eye(3)
-    omega_d = np.zeros(3)
     log = {"t": [], "p": [], "p_d": [], "tilt_deg": [], "arm_err": [],
            "ee_mid": [], "box_set": []}
     t, count = 0.0, 0
@@ -212,7 +278,7 @@ def main():
                 reset_scene()
                 t = 0.0
             rt = t
-            p_d, v_d, a_d, q_arm_d = ref.at(rt)
+            p_d, v_d, a_d, q_arm_d, R_d, omega_d, omega_d_dot = ref.at(rt)   # track PLANNED base pose
 
             p = robot.data.root_pos_w[0].cpu().numpy()
             quat = robot.data.root_quat_w[0]
@@ -224,12 +290,14 @@ def main():
             body_com = robot.data.body_com_pos_w[0]
             whole_com_w = (body_com * masses.unsqueeze(-1)).sum(0) / masses.sum()
             com_off_b = (R.T @ (whole_com_w.cpu().numpy() - p))
-
-            # while the box is lifted (transport), add its mass so gRITE compensates the
-            # extra weight/inertia and the drone does not sag/lag carrying it.
-            ctrl.m = m_total + (box_mass if TRANSPORT_START <= rt < RELEASE_START else 0.0)
+            # NOTE: the carried box is NOT folded into com_off_b. Tested it (explicit box gravity-moment
+            # feedforward); it gave no improvement because the gRITE RISE term ALREADY rejects the box
+            # moment robustly. Kept robot-only so the controller needs no payload model (the stronger
+            # claim). The box mass is still added to ctrl.m below for the thrust magnitude.
+            carrying = ref.transport_start <= rt < ref.release_start
+            ctrl.m = m_total + (box_mass if carrying else 0.0)
             f_body, tau_body = ctrl.compute(p, R, v, omega_b, com_off_b,
-                                            p_d, v_d, a_d, R_d, omega_d)
+                                            p_d, v_d, a_d, R_d, omega_d, omega_d_dot)
 
             forces = torch.zeros(robot.num_instances, 1, 3, device=device)
             torques = torch.zeros_like(forces)
@@ -241,7 +309,7 @@ def main():
             # straight-down release pose (dof1 ~ pi/2) and only spread dof2-4, so the arm
             # sets the box down and STAYS put -- instead of swinging forward to the level
             # start pose (ref.arm[0] has dof1 = 0, which yanked the arm out in front).
-            if rt >= RELEASE_START:
+            if rt >= ref.release_start:
                 arm_cmd = ref.arm[-1].copy()        # straight-down release pose (keeps dof1)
                 arm_cmd[1:4] = ref.arm[0][1:4]      # open the left jaw (dof2-4) in place
                 arm_cmd[5:8] = ref.arm[0][5:8]      # open the right jaw (dof2-4) in place
@@ -259,6 +327,11 @@ def main():
             t += sim_dt
             count += 1
 
+            if camera is not None and count % rec_every == 0:
+                camera.update(sim_dt)
+                rec_frames.append(camera.data.output["rgb"][0, :, :, :3]
+                                  .detach().cpu().numpy().astype(np.uint8))
+
             tilt = float(np.degrees(np.arccos(np.clip(R[2, 2], -1, 1))))
             arm_now = robot.data.joint_pos[0, arm_ids].cpu().numpy()
             log["t"].append(t)
@@ -274,6 +347,13 @@ def main():
                 print(f"[t={t:5.2f}] pos_err=({pe[0]:+.3f},{pe[1]:+.3f},{pe[2]:+.3f}) m "
                       f"tilt={tilt:5.2f} deg arm_err={log['arm_err'][-1]:.3f}")
     finally:
+        if args_cli.record and rec_frames:
+            import imageio.v2 as imageio
+            w = imageio.get_writer(args_cli.record, fps=args_cli.fps, macro_block_size=8)
+            for fr in rec_frames:
+                w.append_data(fr)
+            w.close()
+            print(f"[INFO] wrote {len(rec_frames)} frames -> {args_cli.record}")
         p = np.array(log["p"])
         p_d = np.array(log["p_d"])
         np.savez(args_cli.out, t=np.array(log["t"]), p=p, p_d=p_d,

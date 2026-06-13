@@ -28,6 +28,7 @@ import time
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir)))
 
+import coal  # noqa: E402   (hpp-fcl successor: GJK/EPA collision for capsule/box body model)
 import numpy as np  # noqa: E402
 import pinocchio as pin  # noqa: E402
 from ompl import base as ob  # noqa: E402
@@ -105,6 +106,43 @@ class Geometry:
         self.rack_surf = rack["top"] - 1.5
         self.r_ee = o.get("ee_radius", 0.06)
 
+        # awning window (teammate's scene): a wall SOLID except the opening, plus a tilted sash slab.
+        # Config values are WORLD; convert z to the home frame (-1.5). The box + drone must thread the
+        # opening AND avoid the sash -> forces the diagonal-up reconfiguration. Sash modeled as one
+        # tilted slab: hinge (top, wall side) -> bottom (out toward +x, down) at tilt_deg from vertical.
+        w = o["obstacles"].get("window")
+        self.win = w is not None
+        if self.win:
+            self.win_wx = (float(w["wall_x"][0]), float(w["wall_x"][1]))
+            self.win_oy = (float(w["opening_y"][0]), float(w["opening_y"][1]))
+            self.win_oz = (float(w["opening_z"][0]) - 1.5, float(w["opening_z"][1]) - 1.5)
+            s = w["sash"]
+            th = np.radians(s["tilt_deg"])
+            hinge = np.array([s["hinge_x"], 0.0, s["hinge_z"] - 1.5])
+            u = np.array([np.sin(th), 0.0, -np.cos(th)])      # hinge -> bottom (out +x, down)
+            self.sash_c = hinge + 0.5 * s["slant"] * u        # slab centre
+            self.sash_u, self.sash_v = u, np.array([0.0, 1.0, 0.0])
+            self.sash_n = np.cross(u, self.sash_v)            # slab face normal (cos th, 0, sin th)
+            self.sash_h = np.array([0.5 * s["slant"], 0.5 * s["width"], 0.5 * s["thickness"]])
+
+        # COLLISION-BODY model (coal / hpp-fcl successor, GJK/EPA): the thin carbon-fibre arm links
+        # are CAPSULES (link axis segment + true pipe radius = Minkowski sum of the segment with a
+        # ball), NOT spheres -- a sphere set badly over-bounds a long thin pipe (radial slack + axial
+        # over-cover) and falsely blocks the gap. The drone base is a flat BOX and the payload a BOX.
+        # Collision vs the window = exact GJK distance from each body shape to the wall-border / sash
+        # boxes; capsules are tight for cylinders, so a feasible diagonal-up squeeze is not blocked.
+        # Chains use link1..link4..pad (all consecutive PHYSICAL links, so each pair is one capsule).
+        self._chains = {"l": ["l_link1_01", "l_link2_01", "l_link3_01", "l_link4_01", "ee_l"],
+                        "r": ["r_link1_01", "r_link2_01", "r_link3_01", "r_link4_01", "ee_r"]}
+        self._coll_fids = {n: self.model.getFrameId(n)
+                           for n in set(sum(self._chains.values(), []) + ["base_link_01"])}
+        self.r_link = 0.03                                  # arm-pipe capsule radius (pipe + margin)
+        self.base_box = (0.50, 0.50, 0.16)                  # drone platform full extents (flat slab)
+        self.box_size = np.asarray(task["box"]["size"], float)   # payload box full extents
+        self.win_margin = 0.0                               # extra gap (radii already carry a margin)
+        if self.win:
+            self._build_window_coal()
+
     # --- FK: q14 (base xyz, rotvec, arm8) -> pad positions (numpy) ---
     def fk(self, base_theta6, arm8):
         q = np.empty(self.model.nq)
@@ -152,6 +190,110 @@ class Geometry:
         return (p[2] + 1.5 * (1 - od) - (self.desk_surf + self.r_ee),
                 p[2] + 1.5 * (1 - orr) - (self.rack_surf + self.r_ee))
 
+    def window_clear(self, p, r):
+        """True if point p (clearance r, HOME frame) clears the window: passes through the wall
+        opening (not into the solid wall) AND is outside the tilted sash slab."""
+        if not self.win:
+            return True
+        if self.win_wx[0] - r <= p[0] <= self.win_wx[1] + r:          # inside the wall x-slab
+            if not (self.win_oy[0] + r <= p[1] <= self.win_oy[1] - r and
+                    self.win_oz[0] + r <= p[2] <= self.win_oz[1] - r):
+                return False                                          # hits the solid wall
+        d = p - self.sash_c                                          # tilted sash slab
+        if (abs(d @ self.sash_u) <= self.sash_h[0] + r and
+                abs(d @ self.sash_v) <= self.sash_h[1] + r and
+                abs(d @ self.sash_n) <= self.sash_h[2] + r):
+            return False                                              # hits the sash
+        return True
+
+    @staticmethod
+    def _R_from_axis(d):
+        """Orthonormal rotation whose 3rd column is unit(d) -- coal Capsule axis is its local z, so
+        this orients a capsule along the link segment direction d."""
+        z = d / np.linalg.norm(d)
+        tmp = np.array([1.0, 0.0, 0.0]) if abs(z[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        x = np.cross(tmp, z)
+        x /= np.linalg.norm(x)
+        y = np.cross(z, x)
+        return np.column_stack([x, y, z])
+
+    def _build_window_coal(self):
+        """Build the coal collision objects ONCE (constructing coal geoms is ~25x slower than mutating
+        them, and this is the planner's inner loop). Obstacles (static): the wall is solid EXCEPT the
+        opening (a hole, so non-convex) -> tile its frame with 4 axis-aligned border boxes (below /
+        above / left / right) + the tilted sash box. Body (mutated per query in _update_body): the
+        drone base box, one capsule per arm-link segment, and the payload box."""
+        wx0, wx1 = self.win_wx
+        oy0, oy1 = self.win_oy
+        oz0, oz1 = self.win_oz
+        WY, Z0, Z1 = 2.0, -1.5, 2.5          # wall outer extent (~4 m wall): y in [-2,2], z_home [-1.5,2.5]
+        thick, cx = wx1 - wx0, 0.5 * (wx0 + wx1)
+
+        def box(full, center, R=np.eye(3)):
+            g = coal.Box(float(full[0]), float(full[1]), float(full[2]))
+            return (g, coal.Transform3s(np.asarray(R, float), np.asarray(center, float)))
+
+        self._win_obs = [
+            box((thick, 2 * WY, oz0 - Z0), (cx, 0.0, 0.5 * (Z0 + oz0))),                       # below
+            box((thick, 2 * WY, Z1 - oz1), (cx, 0.0, 0.5 * (oz1 + Z1))),                       # above
+            box((thick, oy0 + WY, oz1 - oz0), (cx, 0.5 * (oy0 - WY), 0.5 * (oz0 + oz1))),      # left
+            box((thick, WY - oy1, oz1 - oz0), (cx, 0.5 * (oy1 + WY), 0.5 * (oz0 + oz1))),      # right
+            box(2 * self.sash_h, self.sash_c,                                                  # sash
+                np.column_stack([self.sash_u, self.sash_v, self.sash_n])),
+        ]
+        self._dreq = coal.DistanceRequest()
+        self._dres = coal.DistanceResult()
+
+        # body objects, created once and mutated in place each query. Ordered fid chains for capsules.
+        self._chain_fids = [[self._coll_fids[n] for n in ch] for ch in self._chains.values()]
+        self._base_fid = self._coll_fids["base_link_01"]
+        self._fid_l, self._fid_r = self._coll_fids["ee_l"], self._coll_fids["ee_r"]
+        self._g_base, self._T_base = coal.Box(*self.base_box), coal.Transform3s()
+        self._g_box, self._T_box = coal.Box(*self.box_size), coal.Transform3s()
+        n_caps = sum(len(ch) - 1 for ch in self._chain_fids)
+        self._caps = [coal.Capsule(self.r_link, 1.0) for _ in range(n_caps)]
+        self._T_caps = [coal.Transform3s() for _ in range(n_caps)]
+        self._body = ([(self._g_base, self._T_base)] + list(zip(self._caps, self._T_caps))
+                      + [(self._g_box, self._T_box)])
+
+    def _update_body(self):
+        """Pose the precreated body coal objects from the current FK (call fk14 first). Base / payload
+        boxes inherit the base attitude; each capsule spans one arm-link segment (length recomputed --
+        the link frames are not all on the joint axes, so segment lengths vary with the arm pose)."""
+        oMf = self.data.oMf
+        bR = oMf[self._base_fid].rotation
+        self._T_base.setRotation(bR)
+        self._T_base.setTranslation(oMf[self._base_fid].translation)
+        ci = 0
+        for chain in self._chain_fids:
+            prev = oMf[chain[0]].translation
+            for f in chain[1:]:
+                cur = oMf[f].translation
+                d = cur - prev
+                L = float(np.linalg.norm(d))
+                self._caps[ci].halfLength = 0.5 * L
+                self._T_caps[ci].setRotation(self._R_from_axis(d) if L > 1e-9 else np.eye(3))
+                self._T_caps[ci].setTranslation(0.5 * (prev + cur))
+                prev, ci = cur, ci + 1
+        self._T_box.setRotation(bR)
+        self._T_box.setTranslation(0.5 * (oMf[self._fid_l].translation + oMf[self._fid_r].translation))
+
+    def window_clear_body(self, q14):
+        """True if the WHOLE robot body (base box + arm-link capsules + payload box) clears the window
+        (wall-border boxes + tilted sash), by coal GJK distance. Tight for the thin pipes, so a
+        feasible diagonal-up squeeze is not falsely blocked the way an enclosing sphere set would be."""
+        if not self.win:
+            return True
+        self.fk14(q14)                                               # FK populates self.data.oMf
+        self._update_body()
+        for bg, bT in self._body:
+            for og_, oT in self._win_obs:
+                self._dres.clear()        # GJK result is stateful: a stale penetration result poisons
+                d = coal.distance(bg, bT, og_, oT, self._dreq, self._dres)   # the next query if reused
+                if d < self.win_margin:
+                    return False
+        return True
+
     def valid(self, q14, carrying):
         """True iff config q14 satisfies the same geometry the OCP enforces."""
         base = q14[0:3]
@@ -163,6 +305,9 @@ class Geometry:
         for c in self.ee_clear(pl) + self.ee_clear(pr):
             if c < tol:
                 return False
+        # window: the WHOLE body (base + arm links + pads + box, sphere set) must clear it
+        if not self.window_clear_body(q14):
+            return False
         if carrying:
             box = 0.5 * (pl + pr)              # box rides at the EE midpoint (no-slip carry)
             for c in self.keep_out(box):
@@ -214,7 +359,7 @@ class _Checker(ob.StateValidityChecker):
 def make_space(geom):
     space = ob.RealVectorStateSpace(14)
     b = ob.RealVectorBounds(14)
-    lo = [-2.9, -1.3, -0.7,  -0.25, -0.25, -0.25,  -1.6, 0, 0, 0,  -1.6, 0, 0, 0]
+    lo = [-5.0, -1.3, -0.7,  -0.25, -0.25, -0.25,  -1.6, 0, 0, 0,  -1.6, 0, 0, 0]  # base x -> -5 (rack at -4)
     hi = [2.9,  1.3,  1.35,   0.25,  0.25,  0.25,   1.6, np.pi, np.pi, np.pi,
           1.6, np.pi, np.pi, np.pi]
     for i in range(14):

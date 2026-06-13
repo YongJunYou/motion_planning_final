@@ -31,8 +31,15 @@ import numpy as np  # noqa: E402
 
 from planner.sampling_compare import Geometry, GEOM_TOL  # noqa: E402
 
-_LO = np.array([-2.9, -1.3, -0.7, -0.25, -0.25, -0.25, -1.6, 0, 0, 0, -1.6, 0, 0, 0])
-_HI = np.array([2.9, 1.3, 1.35, 0.25, 0.25, 0.25, 1.6, np.pi, np.pi, np.pi, 1.6, np.pi, np.pi, np.pi])
+# base attitude (rotvec, idx 3:6) is now FREE over (almost) all of SO(3): the base may yaw and tilt
+# arbitrarily while holding the box (omnidirectional drone). Bounded to +-pi per axis to stay away
+# from the rotvec antipodal wrap at |theta|=pi. The base-frame grip (f above) is attitude-invariant.
+_PI = float(np.pi)
+_LO = np.array([-5.0, -1.3, -0.7, -_PI, -_PI, -_PI, -1.6, 0, 0, 0, -1.6, 0, 0, 0])
+#               ^ base x widened to -5.0 (was -2.9): the rack moved to x=-4, so the base must reach ~-4
+_HI = np.array([2.9, 1.3, 1.90, _PI, _PI, _PI, 1.6, np.pi, np.pi, np.pi, 1.6, np.pi, np.pi, np.pi])
+#                        ^ base z raised to 1.90 (home) so the base can reach the window opening top
+#                          (z 3.068 world = 1.568 home) while carrying the box through it
 
 
 class GraspManifold:
@@ -43,10 +50,15 @@ class GraspManifold:
         self.sep = float(sep)
 
     def f(self, q):
-        # grip contact (pads on the box faces) + parallel jaws (pads pressed FLAT, so the sim grip is
-        # a clean face contact). dof2-dof3-dof4 = 0 per arm is the parallel-jaw condition. The arm can
-        # still reconfigure via dof1 (reach) and the floating base, which is the carry freedom we want.
-        pl, pr = self.geom.fk14(q)
+        # BASE-FRAME grip: compute the pad geometry with the base at identity (arm-only FK), so the
+        # constraint depends ONLY on the arm joints and is INVARIANT to the base pose/attitude. The
+        # base may then take ANY SO(3) attitude (yaw + tilt) while holding the box -- the box reorients
+        # rigidly WITH the base, and the arm only repositions it relative to the base. (A world-frame
+        # grip would instead lock the squeeze axis to world-x and fight any tilt.) Terms: x-separation
+        # = gripped width, y/z alignment (pads directly across), parallel jaws (dof2-dof3-dof4 = 0).
+        qa = q.copy()
+        qa[0:6] = 0.0                          # base at identity -> pads in the base frame
+        pl, pr = self.geom.fk14(qa)
         return np.array([(pr[0] - pl[0]) - self.sep, pl[1] - pr[1], pl[2] - pr[2],
                          q[7] - q[8] - q[9], q[11] - q[12] - q[13]])
 
@@ -85,6 +97,10 @@ class GraspManifold:
         for c in self.geom.keep_out(base):
             if c < tol:
                 return False
+        # awning window: the WHOLE body (base + arm links + pads + box, sphere set) must thread the
+        # opening and avoid the tilted sash -- not just the 3 endpoints (the arm links sweep the wall).
+        if not self.geom.window_clear_body(q):
+            return False
         return True
 
 

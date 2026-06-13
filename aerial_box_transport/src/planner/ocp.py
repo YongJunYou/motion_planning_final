@@ -40,6 +40,17 @@ def theta_to_quat(theta):
     return ca.vertcat(theta[0] * s, theta[1] * s, theta[2] * s, ca.cos(0.5 * ang))
 
 
+def theta_to_R_ca(theta):
+    """Rotation vector -> rotation matrix (CasADi, Rodrigues), smooth at theta = 0. Used to map the
+    BASE-frame grip geometry into the world (the box reorients rigidly with the base)."""
+    ang = ca.sqrt(ca.sumsqr(theta) + 1e-12)
+    k = theta / ang
+    K = ca.vertcat(ca.horzcat(0, -k[2], k[1]),
+                   ca.horzcat(k[2], 0, -k[0]),
+                   ca.horzcat(-k[1], k[0], 0))
+    return ca.DM.eye(3) + ca.sin(ang) * K + (1 - ca.cos(ang)) * (K @ K)
+
+
 def theta_to_R_np(theta):
     ang = float(np.linalg.norm(theta))
     if ang < 1e-9:
@@ -49,13 +60,43 @@ def theta_to_R_np(theta):
     return np.eye(3) + np.sin(ang) * K + (1.0 - np.cos(ang)) * (K @ K)
 
 
-def solve_ocp(verbose=False, seed=None, use_cylinders=True):
+def _arc_resample(path, n):
+    """Constant-arc-length resample of an (M,d) path to n knots."""
+    path = np.asarray(path, float)
+    seg = np.linalg.norm(np.diff(path, axis=0), axis=1)
+    d = np.concatenate([[0.0], np.cumsum(seg)])
+    if d[-1] < 1e-9:
+        return np.repeat(path[:1], n, axis=0)
+    s = np.linspace(0.0, d[-1], n)
+    return np.array([np.interp(s, d, path[:, j]) for j in range(path.shape[1])]).T
+
+
+def _symmetrize_arm(A):
+    """Project arm angles (n,8)=[l1..l4,r1..r4] onto the OCP's L/R mirror subspace (dof1_l=-dof1_r,
+    dof_k_l=dof_k_r for k=2,3,4), so a (possibly asymmetric) sampler seed does not start IPOPT in
+    violation of the symmetry equalities."""
+    A = np.asarray(A, float)
+    S = A.copy()
+    d1 = 0.5 * (A[:, 0] - A[:, 4])
+    S[:, 0], S[:, 4] = d1, -d1
+    for i in (1, 2, 3):
+        m = 0.5 * (A[:, i] + A[:, 4 + i])
+        S[:, i], S[:, 4 + i] = m, m
+    return S
+
+
+def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transport_dur=None):
     robot, task = load_config()
     c, sq, o = robot["contact"], robot["squeeze"], task["ocp"]
     g, m_o = task["gravity"], task["box"]["m_o"]
     k_c, eps, mu = o.get("k_planner", c["k"]), c["eps"], c["mu"]
     half, dt = o["half_extent"], o["dt"]
-    phase_of, N, times = phase_schedule(o["durations"], dt)
+    durs = dict(o["durations"])
+    if transport_dur is not None:            # slow the transport so the controller can track it better
+        durs["transport"] = float(transport_dur)
+    phase_of, N, times = phase_schedule(durs, dt)
+    phase_bounds = np.array([durs["approach"], durs["approach"] + durs["grasp"],
+                             durs["approach"] + durs["grasp"] + durs["transport"]])  # [appEnd,trStart,relStart]
 
     pg, gp = o["arm_pregrasp"], o["arm_grasp"]    # [dof1, dof2, dof3, dof4]; dof1 OPPOSITE on L/R
     arm_pre = np.array([pg[0], pg[1], pg[2], pg[3], -pg[0], pg[1], pg[2], pg[3]])
@@ -122,6 +163,15 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True):
     # built consistently around it below, so IPOPT starts dynamically sane (unlike a raw config seed).
     if seed is not None and "box" in seed:
         box_guess = np.asarray(seed["box"], float).copy()
+    # WINDOW hybrid: the sampler hands off its discovered transport ROUTE (base SE(3) + arm + box).
+    # Resample it onto the OCP transport knots; the box route drives box_guess (so box_ref_z / fn_set
+    # / base_ref below are all consistent), and the base/attitude/arm seed is applied near set_initial.
+    win_route = None
+    if seed is not None and "q_route" in seed and "box_route" in seed:
+        win_route = (_arc_resample(seed["q_route"], len(tr)),
+                     _arc_resample(seed["box_route"], len(tr)))
+        for j, k in enumerate(tr):
+            box_guess[k + 1] = win_route[1][j]
     box_ref_z = box_guess[:, 2]   # use the realistic (up-and-over) z for the slip-aware a_z
 
     # OBSTACLE keep-out (home frame = world - spawn z 1.5). Footprints inflated by body
@@ -200,6 +250,106 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True):
         d2 = (p[0] - cx) ** 2 + (p[1] - cy) ** 2
         return cyl_r ** 2 + cyl_M * (1.0 - act) - d2              # confine d2 <= cyl_r^2 when active
 
+    # ---- AWNING WINDOW keep-out: a DIFFERENTIABLE surrogate of the sampler's coal capsule/box model
+    # (IPOPT cannot use GJK). A set of body points (base, arm-link samples, pads, box) is kept out of
+    # (a) the SOLID WALL -- "a point inside the wall's x-slab must lie inside the opening" (smooth
+    # implication, big-M), and (b) the TILTED SASH slab -- "outside the box" via a smooth max of the
+    # three (inflated) face distances. Each point carries a radius r so the finite samples cover the
+    # real link/base/box thickness (Minkowski). Same role as keep_out, but for the window geometry.
+    win = o["obstacles"].get("window") if window else None
+    if win:
+        from pinocchio import casadi as _cpin               # noqa: F401  (cpin already a dep)
+        wwx = (float(win["wall_x"][0]), float(win["wall_x"][1]))
+        woy = (float(win["opening_y"][0]), float(win["opening_y"][1]))
+        woz = (float(win["opening_z"][0]) - 1.5, float(win["opening_z"][1]) - 1.5)
+        s = win["sash"]
+        s_th = np.radians(float(s["tilt_deg"]))
+        s_hinge = np.array([float(s["hinge_x"]), 0.0, float(s["hinge_z"]) - 1.5])
+        s_u = np.array([np.sin(s_th), 0.0, -np.cos(s_th)])     # hinge -> bottom (out +x, down)
+        s_v = np.array([0.0, 1.0, 0.0])
+        s_n = np.cross(s_u, s_v)                               # slab face normal
+        s_c = s_hinge + 0.5 * float(s["slant"]) * s_u          # slab centre
+        s_h = np.array([0.5 * float(s["slant"]), 0.5 * float(s["width"]), 0.5 * float(s["thickness"])])
+
+        # CasADi FK for the collision frames (positions), built once from the cpin model.
+        qsym = ca.SX.sym("qb", wb.nq)
+        _cpin.forwardKinematics(wb.cmodel, wb.cdata, qsym)
+        _cpin.updateFramePlacements(wb.cmodel, wb.cdata)
+        _coll = ["base_link_01", "l_link1_01", "l_link2_01", "l_link3_01", "l_link4_01",
+                 "r_link1_01", "r_link2_01", "r_link3_01", "r_link4_01", "ee_l", "ee_r"]
+        _fexpr = [wb.cdata.oMf[wb.model.getFrameId(n)].translation for n in _coll]
+        fk_body = ca.Function("fk_body", [qsym], _fexpr, ["q"], _coll)
+        _idx = {n: i for i, n in enumerate(_coll)}
+        _chains = [["l_link1_01", "l_link2_01", "l_link3_01", "l_link4_01", "ee_l"],
+                   ["r_link1_01", "r_link2_01", "r_link3_01", "r_link4_01", "ee_r"]]
+        r_link, r_base = 0.06, 0.18                   # arm-capsule / base inflation (Minkowski radius)
+        box_h = 0.5 * np.asarray(task["box"]["size"], float)   # box half-extents (for oriented-box corners)
+        r_corner = 0.02                               # small inflation on each box corner
+        # (frame a, frame b, t, radius): points DENSELY along each a->b link segment, so the sphere set
+        # covers the (thin) capsule continuously -- sparse samples leave gaps the true coal model catches.
+        body_samples = [(_idx["base_link_01"], _idx["base_link_01"], 0.0, r_base)]
+        for ch in _chains:
+            for a, b in zip(ch[:-1], ch[1:]):
+                for t in (0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.0):
+                    body_samples.append((_idx[a], _idx[b], float(t), r_link))
+        # only constrain knots whose BOX is near the window in x: elsewhere the body is far and the
+        # sash LSE arguments are metres (exp overflow) while the constraint is trivially satisfied.
+        near_win = set(k for k in range(N) if -2.05 <= box_guess[min(k + 1, N)][0] <= 0.6)
+        _BETA = 12.0                                   # smooth-max/min sharpness (softer = better conditioned)
+
+        def _sind_w(v, lo, hi, sw=0.10):               # soft in-[lo,hi] indicator (window x-slab)
+            return 0.5 * (ca.tanh((v - lo) / sw) - ca.tanh((v - hi) / sw))
+
+        def _smin(a, b, beta=_BETA):
+            return -1.0 / beta * ca.log(ca.exp(-beta * a) + ca.exp(-beta * b))
+
+        def _sabs(x):
+            return ca.sqrt(x * x + 1e-9)
+
+        def _viol(c, d=1e-4):                          # smooth hinge ~ max(0, -c)^2 (penetration^2)
+            return (0.5 * (ca.sqrt(c * c + d) - c)) ** 2
+
+        def win_wall(p, r):
+            # PENALTY (>=0) for a point INSIDE the wall x-slab but OUTSIDE the opening. The old form
+            # 'smin(my,mz) + 8*(1-sx)' (a big-M "in-slab => in-opening" implication) was BLIND for this
+            # thin slab: the slab is 0.10 m and the indicator smoothing was just as wide, so sx maxed at
+            # ~0.6 and the 8*(1-sx) ~ 3 m term swamped the sub-metre violation -- a box sitting ENTIRELY
+            # below the opening read as +3 m clear. Multiply instead: penalize the out-of-opening amount
+            # scaled by how much the point is in the slab. A clear (in-opening) point gives _viol=0 either
+            # way, so the working high-tilt passage is untouched; only true clips now register.
+            sx = _sind_w(p[0], wwx[0] - r, wwx[1] + r, sw=0.04)     # sharp: ~1 inside the thin x-slab
+            my = _smin(p[1] - (woy[0] + r), (woy[1] - r) - p[1])    # >=0 inside the opening (y)
+            mz = _smin(p[2] - (woz[0] + r), (woz[1] - r) - p[2])    # >=0 inside the opening (z)
+            return sx * _viol(_smin(my, mz))                       # in slab AND outside opening => penalty
+
+        def win_sash(p, r, beta=_BETA):
+            d = p - s_c
+            du = _sabs(ca.dot(d, s_u)) - (s_h[0] + r)
+            dv = _sabs(ca.dot(d, s_v)) - (s_h[1] + r)
+            dn = _sabs(ca.dot(d, s_n)) - (s_h[2] + r)
+            return 1.0 / beta * ca.log(ca.exp(beta * du) + ca.exp(beta * dv) + ca.exp(beta * dn))
+
+        def window_points(qr, pb):
+            P = fk_body(q_full(qr))                                # 11 frame positions
+            pts = []
+            for (ia, ib, t, r) in body_samples:
+                pa = P[ia]
+                pts.append((pa if ia == ib else pa + t * (P[ib] - pa), r))
+            # the carried box as an ORIENTED box. A single centre sphere (r=0.08 < box half-diagonal
+            # 0.109) under-bounded it; but sampling only the 8 CORNERS has a blind spot too -- the box
+            # x-extent (0.106 m) ~ the wall x-thickness (0.10 m), so when the box straddles the wall plane
+            # all 8 corners poke OUT of the wall's x-slab and the in-slab penalty never fires while the
+            # body sits in the solid wall (coal saw a -10 cm clip the corner surrogate missed). Sample a
+            # 3x3x3 grid instead (corners + edge mids + face centres + CENTRE): the centre / mid-x points
+            # land inside the wall slab on a straddle, so the penalty sees the body, not just the corners.
+            Rb = theta_to_R_ca(qr[3:6])
+            for sx in (-1.0, 0.0, 1.0):
+                for sy in (-1.0, 0.0, 1.0):
+                    for sz in (-1.0, 0.0, 1.0):
+                        c = pb + Rb @ ca.vertcat(sx * box_h[0], sy * box_h[1], sz * box_h[2])
+                        pts.append((c, r_corner))
+            return pts
+
     # base reference path (guide + soft target). APPROACH is over-then-DOWN: home (the
     # spawn) is already ABOVE the box, so no climb is needed; just traverse at the start
     # height to directly OVER the grasp hover, then descend VERTICALLY onto the box. The
@@ -236,17 +386,40 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True):
         arm_ref_ap[k] = arm_start + (arm_pre - arm_start) * frac
     arm_ref_ap[0] = arm_start
 
+    # attitude + arm SEED arrays (default: level base, approach-then-grasp arm). The WINDOW hybrid
+    # overrides the transport knots with the sampler's discovered base tilt + (symmetrized) arm
+    # reconfiguration, and points base_ref at the sampler BASE (NOT box - r_off: the box rides off to
+    # the side to thread the gap, so base != box - r_off there). This seeds the non-level homotopy.
+    theta_seed = np.zeros((N + 1, 3))
+    arm_seed_arr = np.array([arm_ref_ap[k] if phase_of[min(k, N - 1)] == "approach" else arm_grasp
+                             for k in range(N + 1)], float)
+    if win_route is not None:
+        Qr = win_route[0]
+        for j, k in enumerate(tr):
+            base_ref[k + 1] = Qr[j, 0:3]
+            theta_seed[k + 1] = Qr[j, 3:6]
+            arm_seed_arr[k + 1] = Qr[j, 6:14]      # RAW asymmetric arm (window transport allows L!=R)
+
     fn_set = np.full(N + 1, float(sq["floor"]))
     for k in tr:
         a_z = (box_ref_z[k + 1] - 2 * box_ref_z[k] + box_ref_z[k - 1]) / dt ** 2
         fn_set[k] = max(required_normal_force(m_o, max(a_z, 0.0), mu, g, 2) + sq["margin"],
                         sq["floor"])
 
-    def contact(qr, pb):
-        pl, pr = wb.fk_ee(q_full(qr))
-        lam_l = smooth_normal_force((pb[0] - pl[0]) - half, k_c, eps, backend=ca)
-        lam_r = smooth_normal_force((pr[0] - pb[0]) - half, k_c, eps, backend=ca)
-        return pl, pr, lam_l, lam_r
+    _q_ident = ca.DM([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])    # base at identity (pos 0, quat xyzw)
+
+    def fk_arm(arm):
+        return wb.fk_ee(ca.vertcat(_q_ident, arm))           # pads in the BASE frame
+
+    def contact(qr):
+        """BASE-FRAME grip: the squeeze axis is the base x (NOT world x), so the grip is invariant to
+        base attitude and the box reorients rigidly with the (omnidirectional) base. Pads via arm-only
+        FK (base at identity); the world pads / box centre are recovered as base + R(theta) @ (.)."""
+        pl_a, pr_a = fk_arm(qr[6:14])
+        mid_a = 0.5 * (pl_a + pr_a)
+        lam_l = smooth_normal_force((mid_a[0] - pl_a[0]) - half, k_c, eps, backend=ca)
+        lam_r = smooth_normal_force((pr_a[0] - mid_a[0]) - half, k_c, eps, backend=ca)
+        return pl_a, pr_a, mid_a, lam_l, lam_r
 
     opti = ca.Opti()
     QR = [opti.variable(14) for _ in range(N + 1)]   # [pos3, theta3, arm8]
@@ -257,8 +430,29 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True):
     arm_lo = np.array([-1e3, 0, 0, 0, -1e3, 0, 0, 0.0])
     arm_hi = np.array([1e3, np.pi, np.pi, np.pi, 1e3, np.pi, np.pi, np.pi])
     w_base, w_f, w_box, w_hold = 50.0, 1.0, 200.0, 2.0
-    w_reg_a, w_reg_v, w_sym, w_att = 1e-3, 1e-2, 2.0, 30.0
+    w_reg_a, w_reg_v, w_sym, w_tilt = 1e-3, 1e-2, 2.0, 40.0
+    w_yaw = 0.0       # DISABLED: a yaw penalty (tried 8, 15) drags the OCP into a low-tilt local min that
+    #                   CLIPS the box -- the clearing solution uses a combined tilt+yaw whole-body
+    #                   reconfiguration (seed carries yaw; penalizing the rotvec's yaw pulls tilt down too).
+    #                   Box-clear must win. To reduce yaw cleanly would need a low-yaw seed, not a cost.
+    w_yawrate = 10.0  # penalize the RATE of yaw (rotvec-z velocity VR[5]), NOT its value, to remove
+    #                   gratuitous yaw (the trajectory wandered ~440 deg for a ~70 deg net turn). Applied
+    #                   GLOBALLY: the window keep-out (win_wall) now correctly forces the box through the
+    #                   opening, so minimizing yaw motion can no longer escape into a low-tilt clip. The
+    #                   necessary threading yaw is held by the keep-out; only the gratuitous swing goes.
+    #                   (Earlier, with win_wall blind to the wall clip, a global cost flipped to a clip
+    #                   and this had to be gated off the passage; fixing win_wall made the gate moot.)
     w_align = 50.0    # box-under-base: penalize the horizontal box<->base offset (CoM keep)
+    w_win = 60000.0   # window keep-out SOFT penalty (raised so box-clear dominates any local min)
+    # WINDOW tracking: anchor the transport to the sampler's collision-free route (base path + attitude
+    # + arm reconfiguration). Without it IPOPT wanders out of the sampler's good basin into ugly local
+    # minima (fly over the wall, or tilt ~90 deg). With it the OCP REFINES the sampler motion into a
+    # dynamically-feasible, slip-aware, smooth trajectory in the same homotopy.
+    # track the sampler's BASE PATH + ARM (the collision-free homotopy) but NOT its attitude: the raw
+    # CBiRRT seed has excess, run-dependent tilt (e.g. 84 deg early in transport), so let w_tilt
+    # minimize the tilt freely while the window penalty still forces the tilt needed at the gap.
+    w_trk, w_trk_th, w_trk_a = 80.0, 0.0, 20.0
+    v_max, a_max = (5.0, 40.0) if window else (3.0, 25.0)   # window threading is a faster maneuver
 
     opti.subject_to(QR[0] == np.concatenate([home, [0, 0, 0], arm_start]))  # arm level, not down
     opti.subject_to(VR[0] == np.zeros(14))
@@ -266,36 +460,36 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True):
     cost = 0
     for k in range(N):
         ph = phase_of[k]
-        pl, pr, lam_l, lam_r = contact(QR[k], PB[k])
+        pl_a, pr_a, mid_a, lam_l, lam_r = contact(QR[k])
+        Rk = theta_to_R_ca(QR[k][3:6])
+        base_k = QR[k][0:3]
+        pl = base_k + Rk @ pl_a                                  # world-frame pads (clearance/descent)
+        pr = base_k + Rk @ pr_a
+        box_world = base_k + Rk @ mid_a                          # box centre in world (rides the grip)
 
         # robot integration (Euclidean; attitude is a rotation vector)
         opti.subject_to(VR[k + 1] == VR[k] + AR[k] * dt)
         opti.subject_to(QR[k + 1] == QR[k] + VR[k + 1] * dt)
 
-        # box position by phase (carried with no slip during transport)
+        # box position by phase (no-slip carry). The box RIDES the base-frame grip: PB == the world
+        # grip midpoint whenever gripped, pinned to pick/place on the supports. Pads sit ACROSS the
+        # box faces (aligned in the base y,z); the squeeze (lambda) presses them along the base x. This
+        # is attitude-invariant, so the base may tilt to thread the window while the grip stays held.
         if ph in ("approach", "grasp"):
             opti.subject_to(PB[k] == pick)                        # rests on the pick-up support
-        elif ph == "transport":
-            opti.subject_to(PB[k][0] == 0.5 * (pl[0] + pr[0]))    # box x at the EE midpoint
+        elif ph == "release":
+            opti.subject_to(PB[k] == place)                       # placed on the shelf
+        if ph in ("grasp", "transport", "release"):
+            opti.subject_to(PB[k] == box_world)                   # box held at the world grip midpoint
+            opti.subject_to(pl_a[1] == pr_a[1])                   # pads across the box in base y
+            opti.subject_to(pl_a[2] == pr_a[2])                   # pads across the box in base z
+        if ph == "transport":
             opti.subject_to(lam_l >= fn_set[k])                   # slip-aware: enough squeeze to hold
             opti.subject_to(lam_r >= fn_set[k])
             for c in keep_out(PB[k]):                             # the box avoids desk/rack
                 opti.subject_to(c >= 0)
             for c in keep_out(QR[k][0:3]):                        # the drone body avoids them too
                 opti.subject_to(c >= 0)
-        elif ph == "release":
-            opti.subject_to(PB[k] == place)                       # placed on the shelf
-
-        # GRASP DEFINITION (whole-body): the task gives WHERE each pad must be -- the centre
-        # of the box's left / right face. Pin each pad's y,z to the box face centre (PB.y,
-        # PB.z) in every gripping phase; the squeeze (lambda) presses them into the +-x faces.
-        # So the OCP DISCOVERS the base + arm that reach these two pad targets, instead of
-        # tracking a precomputed base_grasp / arm_grasp pose. (Box y,z then follow the pads.)
-        if ph in ("grasp", "transport", "release"):
-            opti.subject_to(pl[1] == PB[k][1])                    # left pad at box face y
-            opti.subject_to(pl[2] == PB[k][2])                    # left pad at box face z
-            opti.subject_to(pr[1] == PB[k][1])                    # right pad at box face y
-            opti.subject_to(pr[2] == PB[k][2])                    # right pad at box face z
 
         opti.subject_to(opti.bounded(arm_lo, QR[k][6:14], arm_hi))
         # keep the gripper jaws PARALLEL (pad faces along world x) at every step, so
@@ -304,21 +498,37 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True):
         # per arm, which is 0 at BOTH arm_pre and arm_grasp; hold it at 0 throughout.
         # k = 0 is already pinned by the initial condition, so skip it (no redundant row).
         if k >= 1:
-            # L/R arm SYMMETRY (the two arms are mirror images): without it the optimizer can
-            # pick an asymmetric pose during the open approach (left pad in front of the box,
-            # right pad behind) that still satisfies the midpoint-over-box pin. Force the mirror.
-            opti.subject_to(QR[k][6] + QR[k][10] == 0.0)   # dof1_l = -dof1_r
-            opti.subject_to(QR[k][7] == QR[k][11])         # dof2_l = dof2_r
-            opti.subject_to(QR[k][8] == QR[k][12])         # dof3_l = dof3_r
-            opti.subject_to(QR[k][9] == QR[k][13])         # dof4_l = dof4_r
-            # parallel jaws (pad faces along world x); the right arm follows by symmetry.
-            opti.subject_to(QR[k][7] - QR[k][8] - QR[k][9] == 0.0)
-        opti.subject_to(opti.bounded(-3.0, VR[k], 3.0))
-        opti.subject_to(opti.bounded(-25.0, AR[k], 25.0))
+            # L/R arm SYMMETRY (the two arms are mirror images): without it the optimizer can pick an
+            # asymmetric pose during the open approach that still satisfies the midpoint-over-box pin.
+            # BUT threading a tilted gap genuinely needs ASYMMETRIC arm reach (the sampler used it), so
+            # for the window we DROP the mirror during transport/release and instead enforce parallel
+            # jaws on BOTH arms independently (the grip stays flat while the arms reconfigure freely).
+            if (not win) or ph in ("approach", "grasp"):
+                opti.subject_to(QR[k][6] + QR[k][10] == 0.0)   # dof1_l = -dof1_r
+                opti.subject_to(QR[k][7] == QR[k][11])         # dof2_l = dof2_r
+                opti.subject_to(QR[k][8] == QR[k][12])         # dof3_l = dof3_r
+                opti.subject_to(QR[k][9] == QR[k][13])         # dof4_l = dof4_r
+                opti.subject_to(QR[k][7] - QR[k][8] - QR[k][9] == 0.0)  # parallel L (R by mirror)
+            else:
+                opti.subject_to(QR[k][7] - QR[k][8] - QR[k][9] == 0.0)     # parallel jaws, L
+                opti.subject_to(QR[k][11] - QR[k][12] - QR[k][13] == 0.0)  # parallel jaws, R
+        opti.subject_to(opti.bounded(-v_max, VR[k], v_max))
+        opti.subject_to(opti.bounded(-a_max, AR[k], a_max))
+        if window:
+            # cap the base height so it THREADS the opening rather than flying OVER the (finite) wall:
+            # the soft window penalty alone lets the base escape above the wall top, since nothing
+            # models wall above z=2.5; this matches the sampler's base-z bound that forced threading.
+            opti.subject_to(QR[k][2] <= 1.6)
         for c in base_clear(QR[k][0:3]):                      # base stays clr above surfaces
             opti.subject_to(c >= 0)
         for c in ee_clear(pl) + ee_clear(pr):                 # gripper pads stay above surfaces
             opti.subject_to(c >= 0)
+        # AWNING WINDOW: keep the whole body (base + arm-link samples + pads) and the carried box out
+        # of the solid wall (must pass through the opening) and the tilted sash, while threading
+        # (transport) and settling behind the wall (release). Inactive elsewhere (points far in x).
+        if win and k in near_win:
+            for (pp, rr) in window_points(QR[k], PB[k]):
+                cost += w_win * (win_wall(pp, rr) + _viol(win_sash(pp, rr)))
         # box rises / descends VERTICALLY in the pick / place cylinders (discovered up-over-down).
         # In the HYBRID (use_cylinders=False) we DROP these: the sampler's box route already supplies
         # the up-over-down homotopy, so the OCP needs only keep_out (real collision) + the costs. The
@@ -363,13 +573,34 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True):
         # this penalty on the horizontal box<->base offset, traded off against base_clear.
         # ALL phases: during the approach this also pulls the base toward over-the-box,
         # replacing the removed base_ref flight guide (so the approach flight is discovered).
-        cost += w_align * ((PB[k][0] - QR[k][0]) ** 2 + (PB[k][1] - QR[k][1]) ** 2)
+        if win:
+            # near the wall x the box MUST ride off to the side to thread the gap, so fade the
+            # box-under-base alignment out there (else it fights the passage); full weight elsewhere.
+            ag = 1.0 - sind(PB[k][0], wwx[0] - 0.7, wwx[1] + 0.7)
+            cost += w_align * ag * ((PB[k][0] - QR[k][0]) ** 2 + (PB[k][1] - QR[k][1]) ** 2)
+        else:
+            cost += w_align * ((PB[k][0] - QR[k][0]) ** 2 + (PB[k][1] - QR[k][1]) ** 2)
 
-        cost += w_att * ca.sumsqr(QR[k][3:6])                     # attitude -> level
+        # WINDOW: track the sampler's transport route (base + attitude + arm) so the OCP refines that
+        # collision-free homotopy instead of wandering to an ugly local min.
+        if win and win_route is not None and ph == "transport":
+            cost += (w_trk * ca.sumsqr(QR[k][0:3] - base_ref[k])
+                     + w_trk_th * ca.sumsqr(QR[k][3:6] - theta_seed[k])
+                     + w_trk_a * ca.sumsqr(QR[k][6:14] - arm_seed_arr[k]))
+
+        # penalize only base TILT (pitch/roll = base z-axis off vertical), NOT yaw. With q = exp(theta),
+        # qx^2+qy^2 = sin^2(tilt/2) is exactly the off-level angle and is yaw-invariant. So yaw / position
+        # / arm stay cheap (only the effort reg below) and the optimizer reorients via yaw + arm, using
+        # pitch/roll only when a constraint (e.g. a tilted gap) forces it.
+        qd = theta_to_quat(QR[k][3:6])
+        cost += w_tilt * (qd[0] ** 2 + qd[1] ** 2) + w_yaw * qd[2] ** 2
         cost += w_reg_a * ca.sumsqr(AR[k]) + w_reg_v * ca.sumsqr(VR[k])
+        cost += w_yawrate * VR[k][5] ** 2          # minimize yaw motion (see w_yawrate note): the window
+        #                                            keep-out holds the threading yaw, this drops the rest
 
     opti.subject_to(PB[N] == place)
-    cost += w_att * ca.sumsqr(QR[N][3:6])
+    qdN = theta_to_quat(QR[N][3:6])
+    cost += w_tilt * (qdN[0] ** 2 + qdN[1] ** 2) + w_yaw * qdN[2] ** 2
     opti.minimize(cost)
 
     # seed the full kinematic guess (pos + vel + acc consistent with base_ref) so
@@ -380,13 +611,18 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True):
     # seed instead fails (it violates the dynamics and the L/R symmetry; IPOPT stalls far from feasible).
     base_v = np.zeros((N + 1, 3))
     base_v[:-1] = (base_ref[1:] - base_ref[:-1]) / dt
+    theta_v = np.zeros((N + 1, 3))
+    theta_v[:-1] = (theta_seed[1:] - theta_seed[:-1]) / dt        # seed omega from the attitude route
+    arm_v = np.zeros((N + 1, 8))
+    arm_v[:-1] = (arm_seed_arr[1:] - arm_seed_arr[:-1]) / dt
+    Vseed = [np.clip(np.concatenate([base_v[k], theta_v[k], arm_v[k]]), -v_max, v_max)
+             for k in range(N + 1)]
     for k in range(N + 1):
-        arm_guess = arm_ref_ap[k] if phase_of[min(k, N - 1)] == "approach" else arm_grasp
-        opti.set_initial(QR[k], np.concatenate([base_ref[k], [0, 0, 0], arm_guess]))
+        opti.set_initial(QR[k], np.concatenate([base_ref[k], theta_seed[k], arm_seed_arr[k]]))
         opti.set_initial(PB[k], box_guess[k])
-        opti.set_initial(VR[k], np.concatenate([base_v[k], np.zeros(11)]))
+        opti.set_initial(VR[k], Vseed[k])
     for k in range(N):
-        opti.set_initial(AR[k], np.concatenate([(base_v[k + 1] - base_v[k]) / dt, np.zeros(11)]))
+        opti.set_initial(AR[k], np.clip((Vseed[k + 1] - Vseed[k]) / dt, -a_max, a_max))
 
     opti.solver("ipopt", {"print_time": False},
                 {"max_iter": 5000, "tol": 1e-4, "acceptable_tol": 1e-3,
@@ -407,8 +643,8 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True):
     base_omdot = np.array([val(AR[k])[3:6] for k in range(N)])
     arm = np.array([val(QR[k])[6:14] for k in range(N + 1)])
     box = np.array([val(PB[k]) for k in range(N + 1)])
-    lam = np.array([[float(val(contact(QR[k], PB[k])[2])),
-                     float(val(contact(QR[k], PB[k])[3]))] for k in range(N)])
+    lam = np.array([[float(val(contact(QR[k])[3])),
+                     float(val(contact(QR[k])[4]))] for k in range(N)])
     # grippers are open and away from the box during approach: the 1D (x-only)
     # contact model reports a spurious value there, so zero it (no contact yet).
     for k in range(N):
@@ -424,7 +660,8 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True):
                                 base_om[:N], base_omdot, omddot], axis=1)
 
     return {
-        "status": status, "times": times, "base": base, "arm": arm, "box": box,
+        "status": status, "times": times, "base": base, "arm": arm, "box": box, "theta": theta,
+        "phase_bounds": phase_bounds,
         "lam": lam, "fn_set": fn_set, "box_ref_z": box_ref_z, "box_ref": box_ref,
         "phase_of": phase_of, "pick": pick, "place": place, "base_ref": base_ref,
         "home": home, "grite_ref": grite_ref, "place_delta": place - pick,

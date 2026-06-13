@@ -127,6 +127,16 @@ def smooth(x, sigma=1.5):
         return x
 
 
+def rotvec_to_R(th):
+    """Rotation vector -> rotation matrix (Rodrigues)."""
+    a = float(np.linalg.norm(th))
+    if a < 1e-9:
+        return np.eye(3)
+    k = np.asarray(th) / a
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * (K @ K)
+
+
 def build_trajectory(geom, seed=7):
     """Plan the full sampler trajectory and return Q (109 x 14) configs [base3, theta3=0, arm8]:
     over-then-down approach + grasp-constrained transport (grip held, arm reconfigures) + alignment
@@ -195,12 +205,16 @@ def main():
     #   grasp/transport/release base stays ON the grasp manifold so the grip residual stays ~0
     arm = Q[:, 6:14].copy()                                  # arm joints (drive the gripper too)
 
+    theta = Q[:, 3:6].copy()                                 # base attitude (rotvec) from the sampler
+    omega = np.gradient(theta, dt, axis=0)                   # ~ angular velocity feedforward
     vel = np.gradient(base, dt, axis=0)
     acc = np.gradient(vel, dt, axis=0)
     jerk = np.gradient(acc, dt, axis=0)
-    gr = np.zeros((M - 1, 30))                               # tracker uses cols 0:3,3:6,6:9 (+R unused)
+    gr = np.zeros((M - 1, 30))
     gr[:, 0:3], gr[:, 3:6], gr[:, 6:9], gr[:, 9:12] = base[:-1], vel[:-1], acc[:-1], jerk[:-1]
-    gr[:, 12:21] = np.eye(3).flatten()
+    for k in range(M - 1):                                   # store the PLANNED base attitude (R, omega)
+        gr[k, 12:21] = rotvec_to_R(theta[k]).flatten(order="F")
+        gr[k, 21:24] = omega[k]
 
     # box centre per knot (FK pad midpoint); unused by the dynamic-box tracker but kept for format.
     box = np.array([0.5 * (np.add(*geom.fk14(Q[k]))) for k in range(M)])
@@ -214,6 +228,15 @@ def main():
           f"max |base vel| = {np.abs(vel).max():.2f} m/s")
     print(f"  knots={M}, duration={times[-1]:.1f}s  "
           f"(approach<=3.0, grasp<=4.6, transport<=9.6, release<=10.8)")
+    if geom.win:
+        bad = sum(1 for k in range(M) if not (
+            geom.window_clear(box[k], 0.0) and geom.window_clear(Q[k, 0:3], 0.0)
+            and geom.window_clear(geom.fk14(Q[k])[0], 0.0)
+            and geom.window_clear(geom.fk14(Q[k])[1], 0.0)))
+        wb = box[(box[:, 0] > -1.1) & (box[:, 0] < -0.3)]
+        print(f"  WINDOW self-check: {M - bad}/{M} knots clear (box+base+pads), "
+              f"max |base tilt| = {np.degrees(np.abs(Q[:,3:6]).max()):.1f} deg; "
+              f"box thru window z {wb[:,2].min():.2f}..{wb[:,2].max():.2f}" if len(wb) else "")
 
 
 if __name__ == "__main__":
