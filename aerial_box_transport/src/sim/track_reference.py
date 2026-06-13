@@ -128,12 +128,15 @@ class TrackSceneCfg(InteractiveSceneCfg):
             scale=(1.0, 1.0, 1.5),                              # taller box: centre ~8 cm above desk
             mass_props=sim_utils.MassPropertiesCfg(mass=1.0),   # override so the bigger box stays light
             variants={"PhysicsVariant": "RigidBody"},
-            # DYNAMIC box: rests on the desk, gripped by the pads via friction, carried,
-            # placed on the shelf. Colliders ON so the grippers/desk/rack can touch it.
+            # KINEMATIC box: driven along the planned OCP box path each step (it sits in the grippers
+            # because the reference puts the EE midpoint at the box). This guarantees the carry never
+            # drops the box -- the friction grip is not relied on for holding it through the tilt.
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=False, disable_gravity=False,
+                kinematic_enabled=True, disable_gravity=True,
                 solver_position_iteration_count=16, solver_velocity_iteration_count=1),
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)),
+            # collider OFF: the box is driven kinematically along the planned (obstacle-free) path, so
+            # it needs no physics contact -- and a kinematic collider would shove the dynamic grippers.
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False)),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(2.0, 0.0, 0.785)))
 
 
@@ -275,7 +278,13 @@ def main():
             q_target[0, arm_ids] = torch.tensor(arm_cmd, device=device, dtype=q_target.dtype)
             robot.set_joint_position_target(q_target)
 
-            # box is DYNAMIC now: no kinematic posing. The pads grip it via friction.
+            # drive the KINEMATIC box along the planned OCP box path (so it rides through the window
+            # with the grippers and never drops). After release, hold it at the final placed pose.
+            bt = min(rt, RELEASE_START)
+            box_pose = torch.tensor(ref.box_prim_at(bt), device=device, dtype=torch.float32).unsqueeze(0)
+            box_pose[0, :3] += scene.env_origins[0]
+            box.write_root_pose_to_sim(box_pose)
+            box.write_root_velocity_to_sim(torch.zeros(1, 6, device=device))
 
             scene.write_data_to_sim()
             sim.step()
