@@ -2,11 +2,10 @@
 
 # M3 box payload. MVP keeps the vertical linear channel; inertia is added with rotation later.
 box:
-  m_o: 1.0                     # mass [kg]. We OVERRIDE the sim box mass to 1.0 kg (mass_props in
-                               # track_reference.py) so the enlarged box stays light enough to grip.
-  size: [0.106, 0.105, 0.158]  # edge lengths [m]. The box is scaled 1.5x in Z (taller) in the sim,
-                               # so its centre sits ~8 cm above the desk -> the gripper grasps higher,
-                               # clear of the desk surface (so EE tracking error no longer hits it).
+  m_o: 0.4                     # mass [kg]. cubebox_a04 (~26 cm cube, teammate's grasped box); the sim
+                               # mass is OVERRIDDEN to 0.4 kg (mass_props) so the friction grip holds.
+  size: [0.26, 0.26, 0.262]    # edge lengths [m] -- cubebox_a04 (measured 0.260/0.260/0.262 m). Origin
+                               # at the base, half-height 0.131 m. Squeeze axis (now world y) half 0.13.
 
 gravity: 9.81               # [m/s^2].
 
@@ -28,8 +27,8 @@ ocp:
   # Matched to the teammate's scene (home = drone spawn at world (0,0,1.5)):
   #   box on the desk at world (2,0,0.838 center)  -> pick = box - spawn = (2,0,-0.662)
   #   place on the rack 1.31 m shelf at world (-2,0,1.365) -> place = (-2,0,-0.135)
-  pick:  [2.0, 0.0, -0.636]   # box CENTRE on the desk (+x); taller box -> centre at world (2,0,0.864)
-  place: [-2.0, 0.0, 0.489]   # rack TOP shelf (z~1.91): taller box CENTRE at world (-2,0,1.989)
+  pick:  [2.0, 0.0, -0.585]   # box CENTRE on the desk (+x); a04 base on desk -> centre world (2,0,0.915)
+  place: [-2.0, 0.0, 0.541]   # rack TOP shelf (z~1.91): a04 CENTRE at world (-2,0,2.041)
   place_rise: 0.6             # only the initial GUESS climbs this high; the actual path is
   #                            DISCOVERED by the obstacle keep-out constraints below.
   # Obstacle bounding boxes (world coords). The box center must stay above `top` (+ box
@@ -37,7 +36,7 @@ ocp:
   obstacles:
     desk: {x: [1.68, 2.32], y: [-0.96, 0.96], top: 0.781}   # desk top surface
     rack: {x: [-2.35, -1.65], y: [-0.80, 0.80], top: 1.91}  # rack top shelf (the landing)
-  half_extent: 0.0525               # half the grasped (x) box dimension [m] (10.5 cm box)
+  half_extent: 0.13                 # half the grasped box dimension along the squeeze axis [m] (a04 ~26 cm)
   # Arm configs are [dof1, dof2, dof3, dof4]. dof1 (applied with OPPOSITE sign on the two arms)
   # tilts both arms DOWN ~27 cm so the pads reach the box while the BASE hovers ~33 cm above the
   # desk/rack surface (avoids ground effect + collision). dof1 preserves the pad x (grip width) and
@@ -53,7 +52,7 @@ ocp:
   #                                 the pad must stay above the desk/rack surface. The taller box
   #                                 grasps at ~8.3 cm above the desk, so this floor (6 cm) leaves the
   #                                 grasp feasible while limiting the approach descent dip (no dive-in).
-  squeeze_grasp: 22.0             # grasp squeeze [N]: close the pads ~11 mm into the box so the
+  squeeze_grasp: 60.0             # grasp squeeze [N]: close the pads ~11 mm into the box so the
   #                                friction grip is firm enough to hold the 0.8 kg box when lifted
   k_planner: 2000.0               # contact stiffness for OCP
   durations: {approach: 3.0, grasp: 1.6, transport: 5.0, release: 1.2}  # gentler: better tracking,

@@ -67,12 +67,12 @@ ARM_ORDER = [f"dof_{s}{i}" for s in ("l", "r") for i in range(1, 5)]
 # The box is KINEMATIC and driven along the OCP box path each step.
 DESK_USD = f"{_REPO}/surroundings/desk_01/desk_01_inst_base.usd"
 RACK_USD = f"{_REPO}/surroundings/rack_l01/rack_l01_inst_base.usd"
-BOX_USD = f"{_REPO}/box/cubebox_a01/cubebox_a01.usd"
+BOX_USD = f"{_REPO}/box/cubebox_a04/cubebox_a04.usd"   # ~26 cm cube (teammate main.py's grasped box)
 WINDOW_USD = f"{_REPO}/surroundings/awing_window.usd"   # awning window the box is threaded through
 DESK_POS = (2.0, 0.0, 0.0)
 RACK_POS = (-2.0, 0.0, 0.0)
 WINDOW_POS = (-1.0, 0.0, 0.0)   # teammate main.py: window centered between pick (+x) and place (-x)
-BOX_BASE_TO_CENTER = 0.079    # box prim origin at its base; center this far up (taller box 0.158/2)
+BOX_BASE_TO_CENTER = 0.131    # box prim origin at its base; center this far up (a04 0.262/2)
 # pad inner-face contact point in the link4 body frame (matches the OCP EE), used to
 # read the ACTUAL gripper midpoint from the sim for debugging / closed-loop box attach.
 EE_OFFSET = {"l": np.array([-0.3969, -0.067, 0.0]), "r": np.array([0.397, -0.067, 0.0])}
@@ -125,19 +125,18 @@ class TrackSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Box",
         spawn=sim_utils.UsdFileCfg(
             usd_path=BOX_USD,
-            scale=(1.0, 1.0, 1.5),                              # taller box: centre ~8 cm above desk
-            mass_props=sim_utils.MassPropertiesCfg(mass=1.0),   # override so the bigger box stays light
+            scale=(1.0, 1.0, 1.0),                              # a04 is a ~26 cm cube (no z stretch)
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.4),   # FIXED 0.4 kg on import (lower in 100 g
+            #                              steps if the friction grip still drops it through the carry)
             variants={"PhysicsVariant": "RigidBody"},
-            # KINEMATIC box: driven along the planned OCP box path each step (it sits in the grippers
-            # because the reference puts the EE midpoint at the box). This guarantees the carry never
-            # drops the box -- the friction grip is not relied on for holding it through the tilt.
+            # DYNAMIC box, gripped by friction (teammate main.py style): the arm closes the pads onto
+            # the box +-y faces (the planned OCP arm trajectory does this) and the friction grip carries
+            # it. Gravity ON, collider ON.
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=True, disable_gravity=True,
+                rigid_body_enabled=True, kinematic_enabled=False, disable_gravity=False,
                 solver_position_iteration_count=16, solver_velocity_iteration_count=1),
-            # collider OFF: the box is driven kinematically along the planned (obstacle-free) path, so
-            # it needs no physics contact -- and a kinematic collider would shove the dynamic grippers.
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False)),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(2.0, 0.0, 0.785)))
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(2.0, 0.0, 0.784)))
 
 
 class Reference:
@@ -183,18 +182,31 @@ def main():
     sim.set_camera_view(eye=[2.5, 2.5, 2.0], target=[0.0, 0.0, 1.6])
     scene = InteractiveScene(TrackSceneCfg(num_envs=1, env_spacing=4.0))
 
-    # DISABLE the box collider BEFORE sim.reset() parses physics (doing it after has no effect). The
-    # box is driven kinematically onto the gripper midpoint where it overlaps the pad links; with a
-    # live collider PhysX shoves the pads and the articulation diverges (base flew to z>4 m, flipped).
+    # HIGH-FRICTION grip: the friction grip slipped the box at the 60deg tilt (mass-independent --
+    # 0.1..0.4 kg all dropped at t~6.6 s). Bind a high-friction physics material to the box and the
+    # gripper pad links BEFORE sim.reset() so the pads can hold the box through the tilted carry.
     import omni.usd  # noqa: E402
-    from pxr import Usd, UsdPhysics  # noqa: E402
+    from pxr import Usd, UsdPhysics, UsdShade  # noqa: E402
     _stage = omni.usd.get_context().get_stage()
-    _noff = 0
-    for _prim in Usd.PrimRange(_stage.GetPrimAtPath("/World/envs/env_0/Box")):
-        if _prim.HasAPI(UsdPhysics.CollisionAPI):
-            UsdPhysics.CollisionAPI(_prim).GetCollisionEnabledAttr().Set(False)
-            _noff += 1
-    print(f"[INFO] disabled {_noff} box collider(s) before physics init")
+    _mat = UsdShade.Material.Define(_stage, "/World/GripMat")
+    UsdPhysics.MaterialAPI.Apply(_mat.GetPrim())
+    _m = UsdPhysics.MaterialAPI(_mat.GetPrim())
+    _m.CreateStaticFrictionAttr().Set(5.0)
+    _m.CreateDynamicFrictionAttr().Set(5.0)
+    _m.CreateRestitutionAttr().Set(0.0)
+    _nbind = 0
+    for _root in ["/World/envs/env_0/Box",
+                  "/World/envs/env_0/Robot/main_v10/main_v10/l_link4_01",
+                  "/World/envs/env_0/Robot/main_v10/main_v10/r_link4_01"]:
+        _rp = _stage.GetPrimAtPath(_root)
+        if not _rp.IsValid():
+            continue
+        for _prim in Usd.PrimRange(_rp):
+            if _prim.HasAPI(UsdPhysics.CollisionAPI):
+                UsdShade.MaterialBindingAPI.Apply(_prim).Bind(
+                    _mat, UsdShade.Tokens.weakerThanDescendants, "physics")
+                _nbind += 1
+    print(f"[INFO] bound high-friction material to {_nbind} box/pad collider(s)")
 
     sim.reset()
     robot: Articulation = scene["robot"]
@@ -241,7 +253,7 @@ def main():
         robot.write_root_velocity_to_sim(root[:, 7:])
         robot.write_joint_state_to_sim(q0, torch.zeros_like(q0))
         box_reset = torch.zeros(1, 7, device=device)
-        box_reset[0, :3] = torch.tensor([2.0, 0.0, 0.785], device=device) + scene.env_origins[0]
+        box_reset[0, :3] = torch.tensor([2.0, 0.0, 0.784], device=device) + scene.env_origins[0]
         box_reset[0, 3] = 1.0
         box.write_root_pose_to_sim(box_reset)
         box.write_root_velocity_to_sim(torch.zeros(1, 6, device=device))
@@ -294,13 +306,7 @@ def main():
             q_target[0, arm_ids] = torch.tensor(arm_cmd, device=device, dtype=q_target.dtype)
             robot.set_joint_position_target(q_target)
 
-            # drive the KINEMATIC box along the planned OCP box path (it rides near the grippers, which
-            # track the same reference). ISOLATION TEST: this path was stable; box-follows-gripper was not.
-            box_pose = torch.tensor(ref.box_prim_at(min(rt, RELEASE_START)), device=device,
-                                    dtype=torch.float32).unsqueeze(0)
-            box_pose[0, :3] += scene.env_origins[0]
-            box.write_root_pose_to_sim(box_pose)
-            box.write_root_velocity_to_sim(torch.zeros(1, 6, device=device))
+            # box is DYNAMIC: the pads grip it by friction (no kinematic posing).
 
             scene.write_data_to_sim()
             sim.step()
