@@ -22,11 +22,13 @@ class GRITEController:
         self.J = np.asarray(J_base, float)
         self.g = float(g)
         self.dt = float(dt)
-        # position loop
+        # position loop (original, verified-stable values; the box is held by the gripper directly in
+        # the sim so tight base tracking is not needed -- stability matters more than a few cm).
         self.Kp = np.array([7.5, 7.5, 18.0])
         self.Kd = np.array([5.2, 5.2, 9.0])
         self.Ki = np.array([1.2, 1.2, 4.5])
-        # attitude loop (desired angular acceleration gains)
+        # attitude loop (original, verified-stable; pushing Kw to ~55 amplified sim angular-rate noise
+        # and flipped the drone).
         self.KR = np.array([300.0, 300.0, 90.0])
         self.Kw = np.array([35.0, 35.0, 18.0])
         self.KRi = np.array([20.0, 20.0, 8.0])

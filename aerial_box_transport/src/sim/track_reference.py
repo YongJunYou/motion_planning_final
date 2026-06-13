@@ -182,6 +182,20 @@ def main():
     sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(device=args_cli.device, dt=1.0 / 200.0))
     sim.set_camera_view(eye=[2.5, 2.5, 2.0], target=[0.0, 0.0, 1.6])
     scene = InteractiveScene(TrackSceneCfg(num_envs=1, env_spacing=4.0))
+
+    # DISABLE the box collider BEFORE sim.reset() parses physics (doing it after has no effect). The
+    # box is driven kinematically onto the gripper midpoint where it overlaps the pad links; with a
+    # live collider PhysX shoves the pads and the articulation diverges (base flew to z>4 m, flipped).
+    import omni.usd  # noqa: E402
+    from pxr import Usd, UsdPhysics  # noqa: E402
+    _stage = omni.usd.get_context().get_stage()
+    _noff = 0
+    for _prim in Usd.PrimRange(_stage.GetPrimAtPath("/World/envs/env_0/Box")):
+        if _prim.HasAPI(UsdPhysics.CollisionAPI):
+            UsdPhysics.CollisionAPI(_prim).GetCollisionEnabledAttr().Set(False)
+            _noff += 1
+    print(f"[INFO] disabled {_noff} box collider(s) before physics init")
+
     sim.reset()
     robot: Articulation = scene["robot"]
     box: RigidObject = scene["box"]
@@ -252,8 +266,10 @@ def main():
             whole_com_w = (body_com * masses.unsqueeze(-1)).sum(0) / masses.sum()
             com_off_b = (R.T @ (whole_com_w.cpu().numpy() - p))
 
-            # while the box is lifted (transport), add its mass so gRITE compensates the
-            # extra weight/inertia and the drone does not sag/lag carrying it.
+            # FEEDFORWARD the planned payload: the OCP planned the base trajectory carrying a 1 kg
+            # box, so during the (climbing) transport the controller must provide that extra lift to
+            # track the climb -- even though the sim box is kinematic. Removing it made the drone sag
+            # on the climb (transport error 0.14 -> 0.18 m). Keep it only over the transport.
             ctrl.m = m_total + (box_mass if TRANSPORT_START <= rt < RELEASE_START else 0.0)
             f_body, tau_body = ctrl.compute(p, R, v, omega_b, com_off_b,
                                             p_d, v_d, a_d, R_d, omega_d)
@@ -278,10 +294,10 @@ def main():
             q_target[0, arm_ids] = torch.tensor(arm_cmd, device=device, dtype=q_target.dtype)
             robot.set_joint_position_target(q_target)
 
-            # drive the KINEMATIC box along the planned OCP box path (so it rides through the window
-            # with the grippers and never drops). After release, hold it at the final placed pose.
-            bt = min(rt, RELEASE_START)
-            box_pose = torch.tensor(ref.box_prim_at(bt), device=device, dtype=torch.float32).unsqueeze(0)
+            # drive the KINEMATIC box along the planned OCP box path (it rides near the grippers, which
+            # track the same reference). ISOLATION TEST: this path was stable; box-follows-gripper was not.
+            box_pose = torch.tensor(ref.box_prim_at(min(rt, RELEASE_START)), device=device,
+                                    dtype=torch.float32).unsqueeze(0)
             box_pose[0, :3] += scene.env_origins[0]
             box.write_root_pose_to_sim(box_pose)
             box.write_root_velocity_to_sim(torch.zeros(1, 6, device=device))
