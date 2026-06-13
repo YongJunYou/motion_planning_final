@@ -49,6 +49,25 @@ def theta_to_R_np(theta):
     return np.eye(3) + np.sin(ang) * K + (1.0 - np.cos(ang)) * (K @ K)
 
 
+def R_to_theta_np(R):
+    """Rotation matrix -> rotation vector (log map)."""
+    ang = float(np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0)))
+    if ang < 1e-9:
+        return np.zeros(3)
+    ax = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]]) / (2.0 * np.sin(ang))
+    return ang * ax
+
+
+def Rz(a):
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def Rx(a):
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+
 def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=None, window=None):
     robot, task = load_config()
     c, sq, o = robot["contact"], robot["squeeze"], task["ocp"]
@@ -66,19 +85,25 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
     def q_full(qr):
         return ca.vertcat(qr[0:3], theta_to_quat(qr[3:6]), qr[6:14])
 
-    # The task is given by two box points: pick and place (in the home frame, where
-    # home = the drone spawn). With the base level the EE midpoint sits a fixed
-    # offset r_off in front of the base, so to grasp a box at `pick` the base must
-    # hover at base_grasp = pick - r_off. The drone starts at home, flies to
-    # base_grasp (approach), grasps, then carries the box to `place`.
-    pl0, pr0 = wb.fk_ee(np.concatenate([[0, 0, 0], [0, 0, 0, 1], arm_grasp]))  # quat xyzw
+    # HEADING: the drone faces world -x (its travel/window direction). Its forward is body -y, so
+    # the base carries a CONSTANT yaw of -90deg about world z (body -y -> world -x; body x -> world
+    # -y). theta (the optimization attitude) is the FULL base rotation vector, and theta_yaw is the
+    # "level, facing -x" reference the attitude cost pulls toward (instead of identity). Because the
+    # arm/pads rotate with the base, the parallel-jaw constraint (pads face body x) now makes them
+    # face world -y, so the SQUEEZE axis is world y (see contact() below). The box still travels along
+    # world x (pick->place), now PERPENDICULAR to the squeeze axis.
+    YAW = -np.pi / 2
+    theta_yaw = R_to_theta_np(Rz(YAW))                  # [0, 0, -pi/2]
+    yaw_quat = np.array([0.0, 0.0, np.sin(YAW / 2), np.cos(YAW / 2)])   # xyzw for R_z(YAW)
+
+    # The task is given by two box points: pick and place (in the home frame, where home = the drone
+    # spawn). With the base at theta_yaw the EE midpoint sits a fixed offset r_off from the base, so
+    # to grasp a box at `pick` the base hovers at base_grasp = pick - r_off.
+    pl0, pr0 = wb.fk_ee(np.concatenate([[0, 0, 0], yaw_quat, arm_grasp]))
     r_off = 0.5 * (np.array(pl0).ravel() + np.array(pr0).ravel())
-    # The box-under-base alignment cost holds the base directly OVER the box, so the base
-    # guide/seed should use ZERO forward (y) offset. Keeping arm_grasp's forward reach here
-    # made base_ref swing out in y (0 -> 0.33 -> 0); the controller then lagged ~5 cm at the
-    # grasp and the gripper closed just OFF the (small) box. Zero it so the base flies in
-    # straight (the actual arm reach-down is still discovered, pads pinned to the box).
-    r_off[1] = 0.0
+    # zero the FORWARD offset (now world x, since forward = -x) so the base seed flies straight over
+    # the box; the actual arm reach is still discovered with the pads pinned to the box.
+    r_off[0] = 0.0
     pick = np.asarray(o["pick"], float)
     place = np.asarray(o["place"], float)
     home = np.zeros(3)
@@ -296,7 +321,10 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
         # about x keeps the two grippers (separated in x) at EQUAL z, so the level grip stays valid
         # (pitching about y split them in z and made the solve infeasible). Sign: nose-up lifts the
         # forward-carried box toward the elevated window.
-        kf["theta"] = np.array([kf["pitch"], 0.0, 0.0])
+        # apex attitude = the constant -90deg yaw (facing -x) composed with a pitch about the body
+        # lateral axis (nose-up lifts the forward-carried box to the window). theta is the rotation
+        # vector of that full orientation. Sign: kf["pitch"] negative = nose-up (set in the script).
+        kf["theta"] = R_to_theta_np(Rz(YAW) @ Rx(kf["pitch"]))
         # apex = the transport knot whose base-x GUESS is nearest the keyframe x (the carry naturally
         # passes that lateral position then). base_ref during transport tracks the carried box.
         tr_arr = np.array(tr)
@@ -316,8 +344,10 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
 
     def contact(qr, pb):
         pl, pr = wb.fk_ee(q_full(qr))
-        lam_l = smooth_normal_force((pb[0] - pl[0]) - half, k_c, eps, backend=ca)
-        lam_r = smooth_normal_force((pr[0] - pb[0]) - half, k_c, eps, backend=ca)
+        # SQUEEZE along world y (the -90deg base yaw turns the body-x pad separation into world y):
+        # left pad sits on +y, right pad on -y, so penetration = (pad - box) on the squeeze axis.
+        lam_l = smooth_normal_force((pl[1] - pb[1]) - half, k_c, eps, backend=ca)
+        lam_r = smooth_normal_force((pb[1] - pr[1]) - half, k_c, eps, backend=ca)
         return pl, pr, lam_l, lam_r
 
     opti = ca.Opti()
@@ -332,7 +362,7 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
     w_reg_a, w_reg_v, w_sym, w_att = 1e-3, 1e-2, 2.0, 30.0
     w_align = 50.0    # box-under-base: penalize the horizontal box<->base offset (CoM keep)
 
-    opti.subject_to(QR[0] == np.concatenate([home, [0, 0, 0], arm_start]))  # arm level, not down
+    opti.subject_to(QR[0] == np.concatenate([home, theta_yaw, arm_start]))  # yawed -x, arm level
     opti.subject_to(VR[0] == np.zeros(14))
 
     # COST is accumulated into NAMED groups (att / align / reg_acc / reg_vel / force / sym / hold)
@@ -366,7 +396,7 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
                 # with the base (the box has no modeled orientation, so the midpoint is the proxy).
                 opti.subject_to(PB[k] == 0.5 * (pl + pr))
             else:
-                opti.subject_to(PB[k][0] == 0.5 * (pl[0] + pr[0]))    # box x at the EE midpoint
+                opti.subject_to(PB[k][1] == 0.5 * (pl[1] + pr[1]))    # box y at the EE midpoint (squeeze y)
             opti.subject_to(lam_l >= fn_set[k])                   # slip-aware: enough squeeze to hold
             opti.subject_to(lam_r >= fn_set[k])
             for c in keep_out(PB[k]):                             # the box avoids desk/rack
@@ -381,17 +411,16 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
         elif ph == "release":
             opti.subject_to(PB[k] == place)                       # placed on the shelf
 
-        # GRASP DEFINITION (whole-body): the task gives WHERE each pad must be -- the centre
-        # of the box's left / right face. Pin each pad's y,z to the box face centre (PB.y,
-        # PB.z) in every gripping phase; the squeeze (lambda) presses them into the +-x faces.
-        # So the OCP DISCOVERS the base + arm that reach these two pad targets, instead of
-        # tracking a precomputed base_grasp / arm_grasp pose. (Box y,z then follow the pads.)
-        # (transport under a keyframe uses the 3D midpoint tie above instead, to allow the tilt.)
+        # GRASP DEFINITION (whole-body): the task gives WHERE each pad must be -- the centre of the
+        # box's left / right face. SQUEEZE is world y, so pin each pad's x,z to the box face centre
+        # (PB.x, PB.z); the squeeze (lambda) presses them into the +-y faces. The OCP DISCOVERS the
+        # base + arm reaching these pad targets. (transport under a keyframe uses the 3D midpoint tie
+        # above instead, to allow the tilt.)
         _level_grip = ph in ("grasp", "transport", "release") and not (ph == "transport" and kf is not None)
         if _level_grip:
-            opti.subject_to(pl[1] == PB[k][1])                    # left pad at box face y
+            opti.subject_to(pl[0] == PB[k][0])                    # left pad at box face x
             opti.subject_to(pl[2] == PB[k][2])                    # left pad at box face z
-            opti.subject_to(pr[1] == PB[k][1])                    # right pad at box face y
+            opti.subject_to(pr[0] == PB[k][0])                    # right pad at box face x
             opti.subject_to(pr[2] == PB[k][2])                    # right pad at box face z
 
         opti.subject_to(opti.bounded(arm_lo, QR[k][6:14], arm_hi))
@@ -463,7 +492,7 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
         cost += add("align", w_align * align_scale[k]
                     * ((PB[k][0] - QR[k][0]) ** 2 + (PB[k][1] - QR[k][1]) ** 2))
 
-        cost += add("att", w_att * att_scale[k] * ca.sumsqr(QR[k][3:6]))   # attitude -> level
+        cost += add("att", w_att * att_scale[k] * ca.sumsqr(QR[k][3:6] - theta_yaw))  # -> yawed level
         cost += add("reg_acc", w_reg_a * ca.sumsqr(AR[k]))
         cost += add("reg_vel", w_reg_v * ca.sumsqr(VR[k]))
 
@@ -480,7 +509,7 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
                 cost += add("waypoint", kf["w_wp"] * ca.sumsqr(QR[k][3:6] - kf["theta"]))
 
     opti.subject_to(PB[N] == place)
-    cost += add("att", w_att * att_scale[N] * ca.sumsqr(QR[N][3:6]))
+    cost += add("att", w_att * att_scale[N] * ca.sumsqr(QR[N][3:6] - theta_yaw))
     opti.minimize(cost)
 
     # record each named cost term per IPOPT iteration (diagnostic: which term drives / blows up the
@@ -508,7 +537,7 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
     # build the per-knot arm + attitude SEED arrays (theta is the rotation-vector attitude,
     # normally seeded level = 0). Splitting them out (vs the old inline [0,0,0]/arm_grasp) lets
     # an optional KEYFRAME blend a tilted, specific config into the transport apex below.
-    theta_seed = np.zeros((N + 1, 3))
+    theta_seed = np.tile(theta_yaw, (N + 1, 1))   # seed the constant -x-facing yaw everywhere
     arm_seed = np.array([arm_ref_ap[k] if phase_of[min(k, N - 1)] == "approach" else arm_grasp
                          for k in range(N + 1)])
 
@@ -620,7 +649,11 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, keyframe=None, warm=
         "phase_of": phase_of, "pick": pick, "place": place, "base_ref": base_ref,
         "home": home, "grite_ref": grite_ref, "place_delta": place - pick,
         "lift": float(place[2] - pick[2]),
-        "max_tilt_deg": float(np.degrees(np.max(np.linalg.norm(theta, axis=1)))),
+        # TILT = angle of the body z-axis from world z (theta now also carries the constant yaw, so
+        # the rotation-vector norm would wrongly read ~90deg; measure the actual tilt instead).
+        "max_tilt_deg": float(np.degrees(np.max([
+            np.arccos(np.clip((theta_to_R_np(theta[k]) @ np.array([0.0, 0.0, 1.0]))[2], -1.0, 1.0))
+            for k in range(N + 1)]))),
         "cost_hist": cost_hist,
         "sol": sol_full,
     }
