@@ -1,0 +1,17 @@
+{
+  "seed": 1,
+  "sampler_solved": true,
+  "route_states": 135,
+  "route_tilt_max": 198.1,
+  "ocp_status": "solved",
+  "ocp_max_tilt_deg": 52.1,
+  "penetrating_knots": 0,
+  "total_knots": 149,
+  "mcm_cm": 5.11,
+  "base_min_cm": 5.11,
+  "arm_min_cm": 5.13,
+  "box_min_cm": 6.76,
+  "delivered": true,
+  "converged": true,
+  "success": true
+}

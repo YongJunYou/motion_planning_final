@@ -1,0 +1,159 @@
+{
+  "trials": 15,
+  "timeout_s": 60.0,
+  "solved": 15,
+  "success_rate": 1.0,
+  "tilt_mean_over_solved": 55.0,
+  "per_trial": [
+    {
+      "seed": 0,
+      "solved": true,
+      "time": 0.7,
+      "nodes": 397,
+      "states": 83,
+      "tilt_max": 117.5,
+      "tilt_mean": 52.9,
+      "window_clear": true
+    },
+    {
+      "seed": 1,
+      "solved": true,
+      "time": 11.4,
+      "nodes": 4436,
+      "states": 135,
+      "tilt_max": 198.1,
+      "tilt_mean": 100.9,
+      "window_clear": true
+    },
+    {
+      "seed": 2,
+      "solved": true,
+      "time": 24.9,
+      "nodes": 8208,
+      "states": 65,
+      "tilt_max": 48.9,
+      "tilt_mean": 24.2,
+      "window_clear": true
+    },
+    {
+      "seed": 3,
+      "solved": true,
+      "time": 3.7,
+      "nodes": 1824,
+      "states": 92,
+      "tilt_max": 112.3,
+      "tilt_mean": 48.6,
+      "window_clear": true
+    },
+    {
+      "seed": 4,
+      "solved": true,
+      "time": 13.0,
+      "nodes": 5055,
+      "states": 104,
+      "tilt_max": 153.8,
+      "tilt_mean": 80.9,
+      "window_clear": true
+    },
+    {
+      "seed": 5,
+      "solved": true,
+      "time": 1.0,
+      "nodes": 486,
+      "states": 78,
+      "tilt_max": 86.9,
+      "tilt_mean": 35.7,
+      "window_clear": true
+    },
+    {
+      "seed": 6,
+      "solved": true,
+      "time": 4.1,
+      "nodes": 1750,
+      "states": 71,
+      "tilt_max": 81.9,
+      "tilt_mean": 35.8,
+      "window_clear": true
+    },
+    {
+      "seed": 7,
+      "solved": true,
+      "time": 16.8,
+      "nodes": 6674,
+      "states": 127,
+      "tilt_max": 206.7,
+      "tilt_mean": 89.5,
+      "window_clear": true
+    },
+    {
+      "seed": 8,
+      "solved": true,
+      "time": 0.2,
+      "nodes": 162,
+      "states": 53,
+      "tilt_max": 43.1,
+      "tilt_mean": 15.3,
+      "window_clear": true
+    },
+    {
+      "seed": 9,
+      "solved": true,
+      "time": 20.6,
+      "nodes": 7842,
+      "states": 88,
+      "tilt_max": 116.9,
+      "tilt_mean": 62.0,
+      "window_clear": true
+    },
+    {
+      "seed": 10,
+      "solved": true,
+      "time": 0.9,
+      "nodes": 555,
+      "states": 61,
+      "tilt_max": 73.9,
+      "tilt_mean": 23.7,
+      "window_clear": true
+    },
+    {
+      "seed": 11,
+      "solved": true,
+      "time": 9.1,
+      "nodes": 4084,
+      "states": 74,
+      "tilt_max": 92.7,
+      "tilt_mean": 36.3,
+      "window_clear": true
+    },
+    {
+      "seed": 12,
+      "solved": true,
+      "time": 7.6,
+      "nodes": 3535,
+      "states": 109,
+      "tilt_max": 159.1,
+      "tilt_mean": 68.1,
+      "window_clear": true
+    },
+    {
+      "seed": 13,
+      "solved": true,
+      "time": 4.3,
+      "nodes": 2113,
+      "states": 82,
+      "tilt_max": 107.8,
+      "tilt_mean": 52.6,
+      "window_clear": true
+    },
+    {
+      "seed": 14,
+      "solved": true,
+      "time": 6.6,
+      "nodes": 3080,
+      "states": 134,
+      "tilt_max": 157.9,
+      "tilt_mean": 98.0,
+      "window_clear": true
+    }
+  ]
+}

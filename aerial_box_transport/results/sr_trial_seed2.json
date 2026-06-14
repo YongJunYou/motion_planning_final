@@ -1,0 +1,17 @@
+{
+  "seed": 2,
+  "sampler_solved": true,
+  "route_states": 65,
+  "route_tilt_max": 48.9,
+  "ocp_status": "failed (Solver failed. You may use opti.debug.value to investigate t)",
+  "ocp_max_tilt_deg": 57.3,
+  "penetrating_knots": 0,
+  "total_knots": 149,
+  "mcm_cm": 1.06,
+  "base_min_cm": 1.06,
+  "arm_min_cm": 5.01,
+  "box_min_cm": 5.21,
+  "delivered": true,
+  "converged": true,
+  "success": true
+}

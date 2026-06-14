@@ -1,0 +1,127 @@
+{
+  "metrics": {
+    "sampling+OCP (baseline)": {
+      "reference": "window_reference_soft_box.npz",
+      "PL_base_m": 13.44,
+      "PL_rot_rad": 5.649,
+      "PL_joint_rad": 10.901,
+      "PL_combined": 20.737,
+      "SR_success": true,
+      "collision_free": true,
+      "delivered": true,
+      "penetrating_knots": 0,
+      "total_knots": 149,
+      "MCM_cm": 1.06,
+      "base_min_cm": 1.06,
+      "arm_min_cm": 5.01,
+      "box_min_cm": 5.21,
+      "max_tilt_deg": 57.3,
+      "TEp_rmse_mm": 41.0,
+      "TEp_max_tilt_deg": 57.4,
+      "TEp_box_tilt_deg": 75.5,
+      "SR_pct": 60.0,
+      "SR_trials": "3/5"
+    },
+    "keyframe+OCP (ours)": {
+      "reference": "window_reference_keyframe.npz",
+      "PL_base_m": 10.37,
+      "PL_rot_rad": 5.333,
+      "PL_joint_rad": 8.638,
+      "PL_combined": 17.369,
+      "SR_success": true,
+      "collision_free": true,
+      "delivered": true,
+      "penetrating_knots": 0,
+      "total_knots": 149,
+      "MCM_cm": 2.3,
+      "base_min_cm": 2.3,
+      "arm_min_cm": 4.68,
+      "box_min_cm": 5.17,
+      "max_tilt_deg": 53.8,
+      "TEp_rmse_mm": 26.9,
+      "TEp_max_tilt_deg": 60.3,
+      "TEp_box_tilt_deg": 87.1,
+      "SR_pct": 100.0,
+      "SR_trials": "1/1 (deterministic)"
+    }
+  },
+  "win_margin_m": 0.0,
+  "sampling_baseline_variability": {
+    "n_trials": 5,
+    "n_success": 3,
+    "SR_pct": 60.0,
+    "MCM_cm": {
+      "mean": -3.71,
+      "std": 10.66,
+      "min": -24.67,
+      "max": 5.11
+    },
+    "max_tilt_deg": {
+      "mean": 90.14,
+      "std": 30.31,
+      "min": 52.1,
+      "max": 125.7
+    },
+    "PL_combined": {
+      "mean": 22.64,
+      "std": 1.04,
+      "min": 20.74,
+      "max": 23.55
+    }
+  },
+  "sr_end_to_end_trials": [
+    {
+      "seed": 0,
+      "success": false,
+      "converged": true,
+      "penetrating_knots": 37,
+      "mcm_cm": -24.67,
+      "ocp_max_tilt_deg": 125.7,
+      "route_tilt_max": 117.5
+    },
+    {
+      "seed": 1,
+      "success": true,
+      "converged": true,
+      "penetrating_knots": 0,
+      "mcm_cm": 5.11,
+      "ocp_max_tilt_deg": 52.1,
+      "route_tilt_max": 198.1
+    },
+    {
+      "seed": 2,
+      "success": true,
+      "converged": true,
+      "penetrating_knots": 0,
+      "mcm_cm": 1.06,
+      "ocp_max_tilt_deg": 57.3,
+      "route_tilt_max": 48.9
+    },
+    {
+      "seed": 3,
+      "success": false,
+      "converged": true,
+      "penetrating_knots": 1,
+      "mcm_cm": -0.86,
+      "ocp_max_tilt_deg": 98.3,
+      "route_tilt_max": 112.3
+    },
+    {
+      "seed": 4,
+      "success": true,
+      "converged": true,
+      "penetrating_knots": 0,
+      "mcm_cm": 0.79,
+      "ocp_max_tilt_deg": 117.3,
+      "route_tilt_max": 153.8
+    }
+  ],
+  "sampler_route_sr": {
+    "trials": 15,
+    "timeout_s": 60.0,
+    "solved": 15,
+    "success_rate": 1.0,
+    "tilt_mean_over_solved": 55.0
+  },
+  "notes": "MCM=coal GJK signed min clearance over all knots/body parts; SR=converged+collision-free(0 pen)+delivered, over independent trials; TEp=IsaacSim gRITE position RMSE; PL=SE(3)+joint config-space arc length (less=better)"
+}
