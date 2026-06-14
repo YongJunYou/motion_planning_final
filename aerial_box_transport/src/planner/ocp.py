@@ -87,7 +87,10 @@ def _symmetrize_arm(A):
 
 def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transport_dur=None,
               window_mode="soft", keyframe=None, w_kf=300.0, w_place=0.0, w_level=0.0,
-              w_padlevel=0.0, w_rise=0.0, warm=None):
+              w_padlevel=0.0, w_rise=0.0, warm=None, jitter=0.0, jitter_seed=None):
+    # jitter: std (m / rad) of Gaussian noise added to the COLD initial guess (base pos, attitude rotvec,
+    #         arm) for random-restart studies (Table I naive / linear-interp sweep). jitter_seed makes a
+    #         run reproducible. 0 = the clean structured guess (default). Ignored on warm/continuation runs.
     # window_mode: "soft" = point-sample body + soft penalty (the working baseline);
     #              "soft_box" = base+box as ANALYTIC oriented boxes (exact, no sampling), soft penalty;
     #              "hard_box" = same analytic body, but opening-containment is a HARD constraint (convex
@@ -758,6 +761,14 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
     # GENTLE -- it overrides only box_guess (the box route) earlier, so base_ref / arm seed /
     # velocities below are built consistently around the sampler route. A raw full-config geometric
     # seed instead fails (it violates the dynamics and the L/R symmetry; IPOPT stalls far from feasible).
+    # RANDOM RESTART: perturb the structured guess in place (before the velocity seed) so the velocity /
+    # acceleration seeds stay finite-difference-consistent with the perturbed configuration. Only the
+    # cold guess moves; the tracked target base_ref baked into the cost above is unchanged.
+    if jitter > 0.0 and warm is None:
+        _jr = np.random.RandomState(jitter_seed)
+        base_ref = base_ref + _jr.normal(0.0, jitter, size=base_ref.shape)
+        theta_seed = theta_seed + _jr.normal(0.0, jitter, size=theta_seed.shape)
+        arm_seed_arr = arm_seed_arr + _jr.normal(0.0, jitter, size=arm_seed_arr.shape)
     base_v = np.zeros((N + 1, 3))
     base_v[:-1] = (base_ref[1:] - base_ref[:-1]) / dt
     theta_v = np.zeros((N + 1, 3))
@@ -814,17 +825,36 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
     _warm_maxit = int(_os2.environ.get("WARM_MAXIT", "400"))   # monotone mu converges steadily (no
     #   dithering), so raise this when a warm run is still descending at the cap (e.g. a different
     #   homotopy that the warm-start is far from); 400 suffices for a local nudge.
+    _cold_maxit = int(_os2.environ.get("COLD_MAXIT", "5000"))  # bound expected-to-fail cold restarts
+    #   (Table I naive / linear-interp sweep): a genuine convergence finishes well under this.
     opti.solver("ipopt", {"print_time": False},
-                {"max_iter": _warm_maxit if _warm else 5000, "tol": 1e-4,
+                {"max_iter": _warm_maxit if _warm else _cold_maxit, "tol": 1e-4,
                  "acceptable_tol": 1e-2 if _warm else 1e-3, "acceptable_iter": 8 if _warm else 15,
                  "print_level": 5 if verbose else 0,
                  "mu_strategy": "monotone" if _warm else "adaptive"})
+    import time as _time
+    _t0 = _time.perf_counter()
     try:
         sol = opti.solve()
         status = "solved"
     except RuntimeError as exc:
         sol = opti.debug
         status = f"failed ({str(exc).splitlines()[-1][:60]})"
+    solve_time = _time.perf_counter() - _t0
+    # IPOPT exit stats: return_status (Solve_Succeeded / Solved_To_Acceptable_Level / Infeasible_Problem_
+    # Detected / Maximum_Iterations_Exceeded / Restoration_Failed ...), iteration count, final primal
+    # infeasibility inf_pr (the Table I convergence criterion is inf_pr < 1e-6 / status Succeeded|Acceptable).
+    try:
+        _st = opti.stats()
+    except Exception:
+        _st = {}
+    return_status = _st.get("return_status", "")
+    iter_count = int(_st.get("iter_count", 0) or 0)
+    inf_pr = float("nan")
+    _its = _st.get("iterations", None)
+    if isinstance(_its, dict) and _its.get("inf_pr"):
+        inf_pr = float(_its["inf_pr"][-1])
+    converged = (return_status in ("Solve_Succeeded", "Solved_To_Acceptable_Level")) or (inf_pr < 1e-6)
 
     val = sol.value
     base = np.array([val(QR[k])[0:3] for k in range(N + 1)])
@@ -859,6 +889,8 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
         "home": home, "grite_ref": grite_ref, "place_delta": place - pick,
         "lift": float(place[2] - pick[2]),
         "max_tilt_deg": float(np.degrees(np.max(np.linalg.norm(theta, axis=1)))),
+        "solve_time": float(solve_time), "iter_count": iter_count,
+        "return_status": return_status, "inf_pr": inf_pr, "converged": bool(converged),
     }
 
 

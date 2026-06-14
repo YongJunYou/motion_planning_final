@@ -22,7 +22,10 @@ from src.planner.sampling_compare import Geometry
 
 DEG = np.pi / 180.0
 KF_BASE = np.array([-0.74, 0.0, 0.65])          # home frame (world 2.15 - spawn 1.5)
-KF_ROTVEC = np.array([0.0, 60.0 * DEG, 0.0])    # pitch +60 deg
+KF_PITCH = float(os.environ.get("KF_PITCH", "60"))   # keyframe base pitch (deg); Table III sweeps 50/60/70
+KF_ROTVEC = np.array([0.0, KF_PITCH * DEG, 0.0])     # pitch about y
+SEED_MODE = os.environ.get("SEED_MODE", "keyframe")  # "keyframe" (g->kf->over->place) | "linear" (g->place)
+SEED_OUT = os.environ.get("SEED_OUT", "/tmp/window_kf_seed.npz")
 
 
 def main():
@@ -37,26 +40,36 @@ def main():
     pl0, pr0 = g.fk14(np.concatenate([[0, 0, 0.0], [0, 0, 0.0], ag]))   # EE midpoint at identity base
     r_off = 0.5 * (np.array(pl0) + np.array(pr0))                       # FULL (anchor box == pick/place)
     base_grasp, base_place = pick - r_off, place - r_off
-    kf_arm = np.load("/tmp/keyframe_closed_arm.npy")
 
     A_g = np.concatenate([base_grasp, [0, 0, 0.0], ag])
-    A_k = np.concatenate([KF_BASE, KF_ROTVEC, kf_arm])
     A_o = np.concatenate([base_place + np.array([0, 0, 0.561]), [0, 0, 0.0], ag])  # box high over the slot
     A_p = np.concatenate([base_place, [0, 0, 0.0], ag])
 
     def lerp(a, b, n):
         return np.array([a + (b - a) * t for t in np.linspace(0.0, 1.0, n)])
 
-    # grasp -> keyframe -> OVER (box ~z 1.05, clears the rack frame) -> place (descend into the slot).
-    # The straight kf->place segment dived into the rack frame too low (z 0.49 < keep-out 0.68) and jammed
-    # the box at the frame; the OVER anchor makes the seed satisfy the rack keep-out (up-and-over the slot).
-    q_route = np.vstack([lerp(A_g, A_k, 12), lerp(A_k, A_o, 12)[1:], lerp(A_o, A_p, 10)[1:]])
+    if SEED_MODE == "linear":
+        # TrajOpt/CHOMP-style baseline: a NAIVE straight C-space interpolation grasp -> place, no keyframe
+        # and no up-and-over. The straight route drives the box through the SOLID wall (it ignores the
+        # window opening), so the OCP that tracks it should stay trapped against the wall (Table I).
+        q_route = lerp(A_g, A_p, 32)
+        kf_idx = -1
+    else:
+        kf_arm = np.load("/tmp/keyframe_closed_arm.npy")
+        A_k = np.concatenate([KF_BASE, KF_ROTVEC, kf_arm])
+        # grasp -> keyframe -> OVER (box ~z 1.05, clears the rack frame) -> place (descend into the slot).
+        # The straight kf->place segment dived into the rack frame too low (z 0.49 < keep-out 0.68) and
+        # jammed the box at the frame; the OVER anchor makes the seed satisfy the rack keep-out.
+        q_route = np.vstack([lerp(A_g, A_k, 12), lerp(A_k, A_o, 12)[1:], lerp(A_o, A_p, 10)[1:]])
+        kf_idx = 14
     box_route = np.array([0.5 * (np.add(*g.fk14(q))) for q in q_route])   # box = FK(config)
 
-    np.savez("/tmp/window_kf_seed.npz", q_route=q_route, box_route=box_route)
+    np.savez(SEED_OUT, q_route=q_route, box_route=box_route)
     clear = sum(int(g.window_clear_body(q)) for q in q_route)
-    print(f"box grasp {np.round(box_route[0],3)}  kf {np.round(box_route[14],3)}  place {np.round(box_route[-1],3)}")
-    print(f"seed knots window-clear {clear}/{len(q_route)}; wrote /tmp/window_kf_seed.npz")
+    kf_txt = "n/a" if kf_idx < 0 else str(np.round(box_route[kf_idx], 3))
+    print(f"mode={SEED_MODE} pitch={KF_PITCH:.0f}  box grasp {np.round(box_route[0],3)}  "
+          f"kf {kf_txt}  place {np.round(box_route[-1],3)}")
+    print(f"seed knots window-clear {clear}/{len(q_route)}; wrote {SEED_OUT}")
 
 
 if __name__ == "__main__":

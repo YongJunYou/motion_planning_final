@@ -88,9 +88,11 @@ def main():
     dres = coal.DistanceResult()
     print(f"window obstacles: {len(g._win_obs)}   body parts: {len(g._body)} (1 base + "
           f"{len(g._body)-2} caps + 1 box)   win_margin={g.win_margin}")
-    for f in ("window_reference_soft_box.npz", "window_reference_wedge_only.npz",
-              "window_reference_keyframe.npz"):
-        report(os.path.join(RDIR, f), g, dreq, dres)
+    # CLI: pass one or more npz paths (absolute, or basename resolved under results/). Defaults to the
+    # two canonical g2 references (sampler-seeded vs keyframe-guided).
+    files = sys.argv[1:] or ["window_reference_sampler_g2.npz", "window_reference_keyframe_g2.npz"]
+    for f in files:
+        report(f if os.path.isabs(f) else os.path.join(RDIR, f), g, dreq, dres)
 
 
 if __name__ == "__main__":

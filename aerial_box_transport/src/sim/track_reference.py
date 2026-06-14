@@ -211,8 +211,14 @@ def spawn_window_proxy():
 
 
 def main():
+    # camera (env-tunable). CAM_EYE / CAM_TARGET = "x,y,z". Default is the 3/4 view; for a side PROFILE
+    # that shows desk(+2) / window(-1) / rack(-4) all at once, look along +y, e.g.
+    # CAM_EYE=-1,-9,2 CAM_TARGET=-1,0,2.
+    _ce, _ct = os.environ.get("CAM_EYE"), os.environ.get("CAM_TARGET")
+    cam_eye = [float(x) for x in _ce.split(",")] if _ce else [2.6, -4.0, 2.6]
+    cam_target = [float(x) for x in _ct.split(",")] if _ct else [-0.8, 0.0, 1.6]
     sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(device=args_cli.device, dt=1.0 / 200.0))
-    sim.set_camera_view(eye=[2.6, -4.0, 2.6], target=[-0.8, 0.0, 1.6])
+    sim.set_camera_view(eye=cam_eye, target=cam_target)
     scene = InteractiveScene(TrackSceneCfg(num_envs=1, env_spacing=4.0))
     spawn_window_proxy()
     camera = None
@@ -232,8 +238,8 @@ def main():
     rec_frames = []
     rec_every = max(1, round((1.0 / sim_dt) / args_cli.fps))   # capture stride for ~fps video
     if camera is not None:
-        camera.set_world_poses_from_view(torch.tensor([[2.6, -4.0, 2.6]], device=device),
-                                         torch.tensor([[-0.8, 0.0, 1.6]], device=device))
+        camera.set_world_poses_from_view(torch.tensor([cam_eye], device=device),
+                                         torch.tensor([cam_target], device=device))
 
     ref = Reference(args_cli.ref)
     arm_ids = [int(robot.find_joints(n)[0][0]) for n in ARM_ORDER]

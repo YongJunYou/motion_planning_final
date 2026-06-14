@@ -22,7 +22,8 @@ DEG = np.pi / 180.0
 
 # the confirmed window keyframe (teammate pose, grip closed to a01): see GUI verification.
 KF_BASE = np.array([-0.74, 0.0, 0.65])          # HOME frame (world 2.15 - spawn 1.5)
-KF_ROTVEC = np.array([0.0, 60.0 * DEG, 0.0])    # pitch +60 deg about y
+KF_PITCH = float(os.environ.get("KF_PITCH", "60"))   # keyframe base pitch (deg); Table III sweeps 50/60/70
+KF_ROTVEC = np.array([0.0, KF_PITCH * DEG, 0.0])     # pitch about y (must match build_kf_seed.py KF_PITCH)
 KF_BOX = np.array([-0.74, -0.585, 0.65])        # box (grip midpoint), home frame
 KF_BOX_X = -0.74                                # x where the keyframe waypoint applies
 
