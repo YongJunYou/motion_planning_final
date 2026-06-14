@@ -18,6 +18,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
 
+# ~3x the default text so the figure stays legible after LaTeX scales it to one column width.
+plt.rcParams.update({
+    "font.size": 28, "axes.titlesize": 32, "axes.labelsize": 30,
+    "xtick.labelsize": 26, "ytick.labelsize": 26, "legend.fontsize": 24,
+    "lines.linewidth": 2.5,
+})
+
 RDIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "results"))
 XLO, XHI = -1.40, -0.70   # wall-crossing slab in box x
 
@@ -32,7 +39,7 @@ def main():
     refs = [("window_reference_sampler_g2.npz", "sampling-seeded"),
             ("window_reference_keyframe_g2.npz", "keyframe-guided (ours)")]
     # stacked top/bottom (one panel per column width) so each panel is wide in a 2-column layout
-    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True, sharey=True)
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True, sharey=True, constrained_layout=True)
     for ax, (name, title) in zip(axes, refs):
         bx, rpy = load(name)
         roll, pitch, yaw = rpy[:, 0], rpy[:, 1], rpy[:, 2]
@@ -41,15 +48,14 @@ def main():
         ax.plot(bx, yaw, "-", color="C3", label="yaw")
         ax.plot(bx, roll, "-", color="C2", label="roll")
         ax.set_title(title)
-        ax.set_ylabel("base euler angle (deg)")
         ax.set_xlim(1.2, -2.2)   # box travels +x (desk) -> -x (rack); reverse so motion reads L->R
         ax.grid(alpha=0.3)
         m = (bx >= XLO) & (bx <= XHI)
         print(f"{title:<26} crossing: pitch [{pitch[m].min():+5.0f},{pitch[m].max():+5.0f}]  "
               f"yaw [{yaw[m].min():+5.0f},{yaw[m].max():+5.0f}]  deg")
     axes[-1].set_xlabel("box x (m)")
-    axes[0].legend(loc="upper left", fontsize=8)
-    fig.tight_layout()
+    axes[0].legend(loc="upper left")
+    fig.supylabel("base euler angle (deg)")   # one shared label spanning both panels (fits the 3x text)
     out = os.path.join(RDIR, "fig_crossing_rpy.png")
     fig.savefig(out, dpi=150)
     print(f"wrote {out}")
