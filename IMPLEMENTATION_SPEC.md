@@ -8,6 +8,13 @@ not available to you, so treat this file as the single source of truth.
 
 Style rule for any prose you generate (comments, README, reports): do not use em-dashes.
 
+> STATUS (2026-06-14): M1 to M6 below are implemented and validated. The project has since been
+> extended with two research lines NOT covered by this locked spec: (a) a planner-comparison study
+> (OCP vs sampling vs hybrid), and (b) carrying the box through a tilted awning window, where a single
+> human keyframe guides the OCP to a collision-free whole-body passage. Those are documented in
+> `ROADMAP.md` (status log) and `aerial_box_transport/README.md` plus `aerial_box_transport/docs/`.
+> This spec remains the source of truth for the original desk-to-rack design (D1 to D8, M1 to M6).
+
 ---
 
 ## 1. One-paragraph summary

@@ -37,14 +37,21 @@ def build():
           f"base tilt max {np.degrees(np.abs(path[:,3:6]).sum(1).max()):.1f} deg (rough)")
 
 
-def solve():
-    from planner.ocp import solve_ocp
-    d = np.load(SEED)
-    res = solve_ocp(window=True, use_cylinders=False, verbose=True, transport_dur=TRANSPORT_DUR,
-                    seed={"q_route": d["q_route"], "box_route": d["box_route"]})
+def _ref_path():
     rdir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "results"))
     os.makedirs(rdir, exist_ok=True)
-    out = os.path.join(rdir, "window_reference.npz")
+    mode = os.environ.get("WINDOW_MODE", "soft")
+    name = "window_reference.npz" if mode == "soft" else f"window_reference_{mode}.npz"
+    return os.path.join(rdir, name)
+
+
+def solve():
+    from planner.ocp import solve_ocp
+    mode = os.environ.get("WINDOW_MODE", "soft")
+    d = np.load(SEED)
+    res = solve_ocp(window=True, use_cylinders=False, verbose=True, transport_dur=TRANSPORT_DUR,
+                    window_mode=mode, seed={"q_route": d["q_route"], "box_route": d["box_route"]})
+    out = _ref_path()
     np.savez(out, times=res["times"], base=res["base"], arm=res["arm"], box=res["box"],
              theta=res["theta"], phase_bounds=res["phase_bounds"], lam=res["lam"],
              fn_set=res["fn_set"], box_ref_z=res["box_ref_z"], box_ref=res["box_ref"],
@@ -63,8 +70,7 @@ def verify():
     import numpy as np
     from planner.sampling_compare import Geometry
     geom = Geometry()
-    rdir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "results"))
-    d = np.load(os.path.join(rdir, "window_reference.npz"))
+    d = np.load(_ref_path())
     base, theta, arm = d["base"], d["theta"], d["arm"]
     Q = np.concatenate([base, theta, arm], axis=1)               # (N+1,14) full configs
     N = len(Q)

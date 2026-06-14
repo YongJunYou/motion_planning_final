@@ -85,15 +85,7 @@ def _symmetrize_arm(A):
     return S
 
 
-def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transport_dur=None,
-              window_mode="soft", keyframe=None, w_kf=300.0):
-    # window_mode: "soft" = point-sample body + soft penalty (the working baseline);
-    #              "soft_box" = base+box as ANALYTIC oriented boxes (exact, no sampling), soft penalty;
-    #              "hard_box" = same analytic body, but opening-containment is a HARD constraint (convex
-    #                           corridor) while the non-convex sash stays a soft penalty.
-    # keyframe: KEYFRAME-GUIDED mode (method 2). dict {"q14": (14,) config, "box_x": float}. When set,
-    #           the sampler-route TRACKING is OFF and a soft waypoint cost (weight w_kf) pulls the window
-    #           knot toward q14. The warm-start still comes from the (interpolated) seed -- no sampler.
+def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transport_dur=None):
     robot, task = load_config()
     c, sq, o = robot["contact"], robot["squeeze"], task["ocp"]
     g, m_o = task["gravity"], task["box"]["m_o"]
@@ -358,64 +350,6 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
                         pts.append((c, r_corner))
             return pts
 
-        base_h = np.array([0.25, 0.25, 0.08])        # drone base box half-extents (0.5 x 0.5 x 0.16 m)
-
-        def arm_only_points(qr):                      # arm-link capsule samples ONLY (base is analytic below)
-            P = fk_body(q_full(qr))
-            out = []
-            for (ia, ib, t, r) in body_samples[1:]:
-                out.append((P[ia] if ia == ib else P[ia] + t * (P[ib] - P[ia]), r))
-            return out
-
-        def _box_radius(Rb, h, n):
-            # support half-width of an oriented box (rotation Rb, half-extents h) along world dir n:
-            # sum_i h_i |(Rb^T n)_i|. Exact + differentiable -> the body needs no point sampling.
-            bn = Rb.T @ n
-            return h[0] * _sabs(bn[0]) + h[1] * _sabs(bn[1]) + h[2] * _sabs(bn[2])
-
-        _EX = ca.DM([1.0, 0.0, 0.0]); _EY = ca.DM([0.0, 1.0, 0.0]); _EZ = ca.DM([0.0, 0.0, 1.0])
-        _Smat = ca.horzcat(ca.DM(s_u.reshape(3, 1)), ca.DM(s_v.reshape(3, 1)), ca.DM(s_n.reshape(3, 1)))
-
-        def win_obox(cc, Rb, h):
-            # ANALYTIC oriented-box vs window. Returns opening-containment margins oy/oz (>=0 = box fully
-            # inside the opening y/z), sx (box x-extent overlaps the wall slab -> gates the opening term),
-            # and a sash separation margin (>0 = clear) via a 6-axis box-box SAT smooth-max (3 sash + 3
-            # box face normals; less conservative than slab-axes-only).
-            rx = _box_radius(Rb, h, _EX); ry = _box_radius(Rb, h, _EY); rz = _box_radius(Rb, h, _EZ)
-            oy_lo = (cc[1] - ry) - woy[0]; oy_hi = woy[1] - (cc[1] + ry)
-            oz_lo = (cc[2] - rz) - woz[0]; oz_hi = woz[1] - (cc[2] + rz)
-            sx = _sind_w(cc[0], wwx[0] - rx, wwx[1] + rx, sw=0.04)
-            d = cc - ca.DM(s_c.reshape(3, 1))
-            seps = []
-            for j in range(3):                                       # 3 sash face normals
-                a = _Smat[:, j]
-                seps.append(_sabs(ca.dot(d, a)) - (float(s_h[j]) + _box_radius(Rb, h, a)))
-            for j in range(3):                                       # 3 box face normals
-                a = Rb[:, j]
-                sa = (float(s_h[0]) * _sabs(ca.dot(_Smat[:, 0], a))
-                      + float(s_h[1]) * _sabs(ca.dot(_Smat[:, 1], a))
-                      + float(s_h[2]) * _sabs(ca.dot(_Smat[:, 2], a)))
-                seps.append(_sabs(ca.dot(d, a)) - (h[j] + sa))
-            sash = 1.0 / _BETA * ca.log(sum(ca.exp(_BETA * sp) for sp in seps))
-            return oy_lo, oy_hi, oz_lo, oz_hi, sx, sash
-
-        _SN = ca.DM(s_n.reshape(3, 1))                       # sash normal (points room-ward + up)
-        _SC = ca.DM(s_c.reshape(3, 1))
-
-        def win_under(p, r):
-            # KEEP the whole body UNDER the sash (below its lower face) within the sash's x-footprint, so
-            # the drone threads the LOWER opening and climbs diagonally up UNDER the sash instead of
-            # skimming the space above it. s_n points room-ward + up, so 'above the sash' is the +s_n side.
-            gx = _sind_w(p[0], -1.10, -0.30, sw=0.12)        # ~1 only under the sash's x-footprint
-            below = -(float(s_h[2]) + r) - ca.dot(p - _SC, _SN)   # >=0 when the point is below the lower face
-            return gx * _viol(below)
-
-        def win_under_box(cc, Rb, h):                        # analytic oriented box (base / payload)
-            gx = _sind_w(cc[0], -1.10, -0.30, sw=0.12)
-            rn = _box_radius(Rb, h, _SN)                      # box half-extent toward the sash normal
-            below = -float(s_h[2]) - (ca.dot(cc - _SC, _SN) + rn)
-            return gx * _viol(below)
-
     # base reference path (guide + soft target). APPROACH is over-then-DOWN: home (the
     # spawn) is already ABOVE the box, so no climb is needed; just traverse at the start
     # height to directly OVER the grasp hover, then descend VERTICALLY onto the box. The
@@ -518,13 +452,6 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
     # CBiRRT seed has excess, run-dependent tilt (e.g. 84 deg early in transport), so let w_tilt
     # minimize the tilt freely while the window penalty still forces the tilt needed at the gap.
     w_trk, w_trk_th, w_trk_a = 80.0, 0.0, 20.0
-    kf_q = ca.DM(keyframe["q14"]) if keyframe is not None else None   # keyframe-guided
-    kf_bx = float(keyframe["box_x"]) if keyframe is not None else None
-    if keyframe is not None:
-        import os as _os
-        w_trk_th = float(_os.environ.get("W_TRK_TH", "80.0"))   # keyframe attitude tracking (env-tunable;
-        #                   0 = soft_box-style base+arm-only tracking, attitude free; >0 follows the
-        #                   keyframe's 60 deg tilt. Ramp this up (continuation) if a cold high value fails.
     v_max, a_max = (5.0, 40.0) if window else (3.0, 25.0)   # window threading is a faster maneuver
 
     opti.subject_to(QR[0] == np.concatenate([home, [0, 0, 0], arm_start]))  # arm level, not down
@@ -600,24 +527,8 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
         # of the solid wall (must pass through the opening) and the tilted sash, while threading
         # (transport) and settling behind the wall (release). Inactive elsewhere (points far in x).
         if win and k in near_win:
-            if window_mode == "soft":
-                for (pp, rr) in window_points(QR[k], PB[k]):
-                    cost += w_win * (win_wall(pp, rr) + _viol(win_sash(pp, rr)) + win_under(pp, rr))
-            else:                                       # soft_box / hard_box: analytic base + box
-                for (pp, rr) in arm_only_points(QR[k]):                  # arm links: keep point-sampled
-                    cost += w_win * (win_wall(pp, rr) + _viol(win_sash(pp, rr)) + win_under(pp, rr))
-                Rk = theta_to_R_ca(QR[k][3:6])
-                gx = float(box_guess[min(k + 1, N)][0])
-                crossing = (wwx[0] - 0.12) <= gx <= (wwx[1] + 0.12)      # box at the wall plane (seed)
-                for (cc, hh) in ((QR[k][0:3], base_h), (PB[k], box_h)):
-                    oy_lo, oy_hi, oz_lo, oz_hi, sx, sash = win_obox(cc, Rk, hh)
-                    cost += w_win * (_viol(sash) + win_under_box(cc, Rk, hh))   # outside slab AND below it
-                    if window_mode == "hard_box" and crossing:          # HARD opening containment (convex)
-                        opti.subject_to(oy_lo >= 0); opti.subject_to(oy_hi >= 0)
-                        opti.subject_to(oz_lo >= 0); opti.subject_to(oz_hi >= 0)
-                    else:                                                # soft opening (sx-gated to the slab)
-                        cost += w_win * sx * (_viol(oy_lo) + _viol(oy_hi)
-                                              + _viol(oz_lo) + _viol(oz_hi))
+            for (pp, rr) in window_points(QR[k], PB[k]):
+                cost += w_win * (win_wall(pp, rr) + _viol(win_sash(pp, rr)))
         # box rises / descends VERTICALLY in the pick / place cylinders (discovered up-over-down).
         # In the HYBRID (use_cylinders=False) we DROP these: the sampler's box route already supplies
         # the up-over-down homotopy, so the OCP needs only keep_out (real collision) + the costs. The
@@ -670,21 +581,12 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
         else:
             cost += w_align * ((PB[k][0] - QR[k][0]) ** 2 + (PB[k][1] - QR[k][1]) ** 2)
 
-        # WINDOW: TRACK the transport route (base + arm, and attitude in keyframe mode) so the OCP refines
-        # that collision-free homotopy instead of wandering to an ugly / infeasible min. The route is the
-        # sampler path (sampler-guided) OR the keyframe interpolation (keyframe-guided) -- same mechanism,
-        # different source. This tracking is load-bearing: without it the window OCP wanders.
+        # WINDOW: track the sampler's transport route (base + attitude + arm) so the OCP refines that
+        # collision-free homotopy instead of wandering to an ugly local min.
         if win and win_route is not None and ph == "transport":
             cost += (w_trk * ca.sumsqr(QR[k][0:3] - base_ref[k])
                      + w_trk_th * ca.sumsqr(QR[k][3:6] - theta_seed[k])
                      + w_trk_a * ca.sumsqr(QR[k][6:14] - arm_seed_arr[k]))
-        # KEYFRAME-GUIDED: a light extra waypoint at the window moment sharpens the anchor on the keyframe
-        # knot, on top of the full-route tracking above (the route already passes through the keyframe).
-        if win and keyframe is not None and ph == "transport":
-            if abs(float(box_guess[min(k + 1, N)][0]) - kf_bx) <= 0.10:
-                cost += w_kf * (ca.sumsqr(QR[k][0:3] - kf_q[0:3])
-                                + ca.sumsqr(QR[k][3:6] - kf_q[3:6])
-                                + ca.sumsqr(QR[k][6:14] - kf_q[6:14]))
 
         # penalize only base TILT (pitch/roll = base z-axis off vertical), NOT yaw. With q = exp(theta),
         # qx^2+qy^2 = sin^2(tilt/2) is exactly the off-level angle and is yaw-invariant. So yaw / position

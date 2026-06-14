@@ -45,13 +45,25 @@
   플래너 비교 연구: 샘플링 플래너 sweep(`sampling_compare.py`), grasp-constrained 운반
   CBiRRT(`grasp_constrained.py`), 샘플 경로->트래커 변환(`sampling_to_reference.py`),
   샘플->OCP 하이브리드(`hybrid_seed_ocp.py`), 비교 그림(`plot_compare.py`), OCP 시간측정
-  (`time_ocp.py`)
-- `src/sim/`       gRITE SE(3) 컨트롤러(`grite_controller.py`), IsaacSim 재생/검증
-  (`track_reference.py`)
+  (`time_ocp.py`).
+  **창문 통과 연구**: 창문 keep-out을 추가한 OCP(`ocp.py`의 `solve_ocp(window=True)`),
+  창문 충돌을 coal(GJK/EPA)로 보는 샘플러(`sampling_compare.py`), 윈도우 CBiRRT 테스트
+  (`window_test.py`), 샘플->OCP 윈도우 하이브리드(`hybrid_window.py`).
+  **키프레임 가이드**(메인 연구): 제약 일관 보간 seed 생성(`build_kf_seed.py`), 키프레임
+  유도 OCP(`keyframe_window.py`), 세 레퍼런스의 coal 정량 검증(`verify_window.py`).
+  시각화/문서: 재생 파일 변환(`export_play.py`), 한국어 방법론 PDF(`make_window_method_pdf.py`),
+  안정 동작 버전 백업(`ocp_soft_working.py`)
+- `src/sim/`       gRITE SE(3) 컨트롤러(`grite_controller.py`), IsaacSim 동역학 재생/검증
+  (`track_reference.py`, 동적 박스 + 실제 창 충돌체), 계획 경로의 기구학적 재생
+  (`play_path.py`, 계획 자세를 그대로 포즈; `--proxy`로 창문 keep-out 볼륨 표시)
 - `src/baselines/`, `src/experiments/`  고정력 베이스라인, 가속도 스윕/헤드라인 플롯
 - `tests/`         플래너 단위테스트(pytest)
-- `docs/`          `OCP_formulation.pdf` (비용 함수 + 제약조건 상세 설명, 한국어)
-- `results/`       생성 산출물(궤적 npz, 그림). git에는 포함되지 않음(재생성 가능)
+- `docs/`          `OCP_formulation.pdf`(비용 함수 + 제약조건, 한국어),
+  `window_method_ko.pdf`(창문 통과 방법론, 한국어), `window_keyframe_results.md`
+  (키프레임 가이드 3종 비교 결과 + 재현 명령)
+- `results/`       생성 산출물(궤적 npz, 그림). git에는 포함되지 않음(재생성 가능).
+  창문 레퍼런스: `window_reference_soft_box.npz`(샘플러 가이드), `window_reference_wedge_only.npz`
+  (wedge 제약), `window_reference_keyframe.npz`(키프레임 가이드)
 
 ## 환경 (conda 3개)
 환경 자체(설치된 패키지 폴더)는 git에 올리지 않습니다(수 GB, 플랫폼 의존 바이너리).
@@ -151,3 +163,67 @@ conda run -n am_isaac    python src/sim/track_reference.py --ref results/hybrid_
 유리하며, 하이브리드(샘플러 경로로 OCP warm-start)가 둘의 장점을 결합합니다. 단 하이브리드
 handoff는 plug-and-play가 아니라 formulation을 맞춰야 합니다(샘플러 경로가 OCP의 cylinder를
 대체, OCP가 자체 일관된 dynamic seed 생성).
+
+## 창문 통과 + 키프레임 가이드 (메인 연구, ICRA/IROS 타겟)
+박스를 들고 **부분 개방된 기울어진 차양(awning) 창문**을 통과하는, 전신 재구성이 필요한
+narrow passage 문제입니다. 벽은 개구부를 제외하면 막혀 있고(비볼록), sash가 32.4° 기울어
+방을 향해 돌출해 있어, 드론이 자세를 바꿔 박스를 대각선으로 비집어 넣어야 합니다.
+
+**충돌 모델**(`sampling_compare.py`): 몸체를 coal 3.0.3(GJK/EPA)로 봅니다. 얇은 탄소
+파이프 팔은 **캡슐**(축 선분 + 반지름), base는 납작한 **박스**, 박스는 **박스**로 두고,
+창문은 개구부를 둘러싼 4개의 축정렬 벽 박스 + 기울어진 sash 박스로 봅니다. 구(sphere)
+집합으로 감싸면 얇은 파이프를 과대평가해 통과 가능한 틈을 막아버립니다.
+
+**창문 OCP**(`ocp.py`의 `solve_ocp(window=True, window_mode=...)`): 창문 keep-out을 미분
+가능한 **soft penalty**로 넣습니다(hard 제약은 IPOPT multiplier가 발산). `window_mode`는
+`soft`(점 샘플), `soft_box`(분석적 oriented-box support 함수)를 지원합니다. 윈도우 통과는
+pick/place의 수직 cylinder 제약과 충돌하므로 **반드시 `use_cylinders=False`**로 풀어야 합니다.
+
+**wedge keep-out**(`win_under`): sash의 얇은 판만 막지 않고, sash **윗 공간 전체**에 몸체가
+들어가는 것을 금지합니다(`(p - s_c)·s_n <= -(h+r)`, sash x-구간으로 게이팅). 그러면 몸체가
+sash 아래로 내려가 더 낮은 개구부를 통과하도록 자연스럽게 유도됩니다.
+
+**키프레임 가이드**(메인 가설): 샘플러 대신 사람이 준 키프레임 한 개로 OCP를 안내합니다.
+`build_kf_seed.py`(am_sampling)가 grasp->keyframe->over(rack)->place를 **제약 일관**하게
+보간한 seed를 만들고(팔 좌우대칭 + 박스=FK(config)), `keyframe_window.py`(am_dualarm)가
+키프레임 창 knot에 soft waypoint를 걸어 OCP를 풉니다. seed/가중치는 `KF_SEED`, `W_KF`,
+`W_TRK_TH` 환경변수로 조절합니다.
+
+**결과**(`verify_window.py`, am_sampling, coal 부호 거리로 세 레퍼런스를 동일 방식 검증):
+
+| 지표 (149 knots) | soft_box(샘플러) | wedge_only | **keyframe** |
+|---|---|---|---|
+| base 최소 여유 | -3.8 cm | -0.9 cm | **+2.8 cm** |
+| arm 최소 여유 | +0.2 cm | +3.3 cm | **+5.7 cm** |
+| box 최소 여유 | +2.6 cm | +3.8 cm | **+4.1 cm** |
+| 창 관통 knot | 2 / 149 | 2 / 149 | **0 / 149** |
+| 최대 자세(rotvec norm) | 86.7° | 96.8° | **53.2°** |
+
+핵심: 가이드 없는 해는 큰 자세가 대부분 **yaw**입니다. base를 옆으로 85~90° 돌려 몸의 긴
+축을 모로 세워 비집고(yaw -81~-90°, pitch만 +16~+24°) 통과하지만 창틀을 긁습니다(관통 2회).
+사람 키프레임 하나(pitch 60°, yaw 없음)는 **pitch +1~+47.5°**의 정면 대각선 통과로 유도해,
+기울어진 차양에 몸을 기울여 들어갑니다. 결과는 **유일한 무충돌 궤적(0/149)**, 모든 부위
+최고 여유, 그리고 훨씬 온건한 자세(53° vs 87~97°)입니다. 즉 키프레임은 기존 경로를 미세
+조정한 게 아니라, 질적으로 다르고 더 나은 homotopy class를 선택합니다. 자세한 표와 해석은
+`docs/window_keyframe_results.md`를 보세요.
+
+실행 예:
+```
+# 1) 키프레임 보간 seed 생성 (am_sampling, FK 필요)
+conda run -n am_sampling python src/planner/build_kf_seed.py
+# 2) 키프레임 가이드 OCP (am_dualarm) -> results/window_reference_keyframe.npz
+W_KF=40 W_TRK_TH=0 conda run -n am_dualarm python src/planner/keyframe_window.py
+# 3) 세 레퍼런스 coal 정량 비교 (am_sampling)
+conda run -n am_sampling python src/planner/verify_window.py
+# 4a) 계획 경로 기구학적 재생 (am_isaac, 창문 keep-out 볼륨 표시)
+conda run -n am_sampling python src/planner/export_play.py /tmp/window_kf_path.npy \
+    /tmp/window_kf_play.npz --box results/window_reference_keyframe.npz
+conda run -n am_isaac python src/sim/play_path.py --play /tmp/window_kf_play.npz --proxy --loop
+# 4b) gRITE 동역학 추종 (am_isaac, 동적 박스 + 실제 창 충돌체)
+conda run -n am_isaac python src/sim/track_reference.py \
+    --ref results/window_reference_keyframe.npz --loop --max_time 15
+```
+
+gRITE 동역학 추종 결과: 창 통과 순간(최대 pitch 53.5°) base 위치 오차 약 1.9 cm, arm
+오차 0.04~0.07 rad로 그립을 유지한 채 통과합니다. 즉 키프레임 경로는 기하적 무충돌일 뿐
+아니라 실제 컨트롤러로 동역학적으로도 추종 가능합니다.

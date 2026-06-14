@@ -59,7 +59,7 @@ DESK_USD = f"{_REPO}/surroundings/desk_01/desk_01_inst_base.usd"
 RACK_USD = f"{_REPO}/surroundings/rack_l01/rack_l01_inst_base.usd"
 BOX_USD = f"{_REPO}/box/cubebox_a01/cubebox_a01.usd"
 WINDOW_USD = f"{_REPO}/surroundings/awing_window.usd"
-DESK_POS, RACK_POS, WINDOW_POS = (2.0, 0.0, 0.0), (-2.0, 0.0, 0.0), (-1.0, 0.0, 0.0)
+DESK_POS, RACK_POS, WINDOW_POS = (2.0, 0.0, 0.0), (-4.0, 0.0, 0.0), (-1.0, 0.0, 0.0)
 
 ROBOT_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
