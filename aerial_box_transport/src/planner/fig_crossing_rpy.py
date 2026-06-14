@@ -38,7 +38,7 @@ def main():
         ax.axvspan(XLO, XHI, color="0.85", zorder=0, label="wall slab")
         ax.plot(bx, pitch, "-", color="C0", label="pitch")
         ax.plot(bx, yaw, "-", color="C3", label="yaw")
-        ax.plot(bx, roll, ":", color="0.5", lw=1, label="roll")
+        ax.plot(bx, roll, "-", color="C2", label="roll")
         ax.set_title(title)
         ax.set_xlabel("box x (m)")
         ax.set_xlim(1.2, -2.2)   # box travels +x (desk) -> -x (rack); reverse so motion reads L->R
