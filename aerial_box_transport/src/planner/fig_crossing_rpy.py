@@ -31,7 +31,8 @@ def load(name):
 def main():
     refs = [("window_reference_sampler_g2.npz", "sampling-seeded"),
             ("window_reference_keyframe_g2.npz", "keyframe-guided (ours)")]
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+    # stacked top/bottom (one panel per column width) so each panel is wide in a 2-column layout
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True, sharey=True)
     for ax, (name, title) in zip(axes, refs):
         bx, rpy = load(name)
         roll, pitch, yaw = rpy[:, 0], rpy[:, 1], rpy[:, 2]
@@ -40,13 +41,13 @@ def main():
         ax.plot(bx, yaw, "-", color="C3", label="yaw")
         ax.plot(bx, roll, "-", color="C2", label="roll")
         ax.set_title(title)
-        ax.set_xlabel("box x (m)")
+        ax.set_ylabel("base euler angle (deg)")
         ax.set_xlim(1.2, -2.2)   # box travels +x (desk) -> -x (rack); reverse so motion reads L->R
         ax.grid(alpha=0.3)
         m = (bx >= XLO) & (bx <= XHI)
         print(f"{title:<26} crossing: pitch [{pitch[m].min():+5.0f},{pitch[m].max():+5.0f}]  "
               f"yaw [{yaw[m].min():+5.0f},{yaw[m].max():+5.0f}]  deg")
-    axes[0].set_ylabel("base euler angle (deg)")
+    axes[-1].set_xlabel("box x (m)")
     axes[0].legend(loc="upper left", fontsize=8)
     fig.tight_layout()
     out = os.path.join(RDIR, "fig_crossing_rpy.png")
