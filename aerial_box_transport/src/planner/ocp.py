@@ -86,7 +86,7 @@ def _symmetrize_arm(A):
 
 
 def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transport_dur=None,
-              window_mode="soft", keyframe=None, w_kf=300.0):
+              window_mode="soft", keyframe=None, w_kf=300.0, w_place=0.0, w_level=0.0, warm=None):
     # window_mode: "soft" = point-sample body + soft penalty (the working baseline);
     #              "soft_box" = base+box as ANALYTIC oriented boxes (exact, no sampling), soft penalty;
     #              "hard_box" = same analytic body, but opening-containment is a HARD constraint (convex
@@ -626,6 +626,28 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
         if use_cylinders:
             opti.subject_to(cylinder(PB[k], pick[0], pick[1], z_top_pick, +1.0) >= 0)
             opti.subject_to(cylinder(PB[k], place[0], place[1], z_top_place, -1.0) >= 0)
+        # WINDOW placement fix (SOFT penalties, so they never break feasibility; the hard corridor
+        # destabilized IPOPT). Both are gated to the rack x-FOOTPRINT (|x - place_x| small), NOT to
+        # the side of x_mid = -1.0 which coincides with the window -- so neither touches the tilted
+        # window passage. Without them the box swings in from the side, tilted and yawed, and tips
+        # when the terminal pin (PB[N]==place) snaps it to the shelf.
+        if (w_place > 0.0 or w_level > 0.0) and ph in ("transport", "release"):
+            g_rack = 0.5 * (ca.tanh((PB[k][0] - (place[0] - 0.5)) / 0.12)
+                            - ca.tanh((PB[k][0] - (place[0] + 0.5)) / 0.12))   # ~1 over the rack x
+            if w_place > 0.0:                       # pull the box DOWN a vertical column over `place`:
+                g_low = 0.5 * (1.0 - ca.tanh((PB[k][2] - z_top_place) / 0.06))  # ~1 below z_top_place
+                cost += w_place * g_rack * g_low * ((PB[k][0] - place[0]) ** 2
+                                                    + (PB[k][1] - place[1]) ** 2)
+            if w_level > 0.0:                       # LEVEL the base (tilt AND yaw -> 0) for the WHOLE
+                # post-window flight, not just at the rack. Once the box clears the wall (x < ~-1.35)
+                # the window pitch is no longer needed, so recover to level and HOLD it through the
+                # flight + descent, so the rigidly-gripped box stays FLAT and lands on its bottom face.
+                # Why this is needed: the box-under-base cost (w_align=50) ROLLS the base ~30 deg to
+                # tuck the forward-reaching grip (mid_arm ~0.43 m forward) under the CoM, which plain
+                # w_tilt (40) does not outvote -- so without this the base coasts tilted to the rack
+                # and the box comes down on an edge. (yaw is otherwise unpenalized: w_yaw = 0.)
+                g_post = 0.5 * (1.0 - ca.tanh((PB[k][0] + 1.35) / 0.15))   # ~1 once past the wall (x<-1.35)
+                cost += w_level * g_post * ca.sumsqr(QR[k][3:6])
 
         if ph == "approach":
             # Hold the gripper OPEN (dof2-4) but leave dof1 FREE (arm-lowering discovered).
@@ -715,16 +737,55 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
     arm_v[:-1] = (arm_seed_arr[1:] - arm_seed_arr[:-1]) / dt
     Vseed = [np.clip(np.concatenate([base_v[k], theta_v[k], arm_v[k]]), -v_max, v_max)
              for k in range(N + 1)]
-    for k in range(N + 1):
-        opti.set_initial(QR[k], np.concatenate([base_ref[k], theta_seed[k], arm_seed_arr[k]]))
-        opti.set_initial(PB[k], box_guess[k])
-        opti.set_initial(VR[k], Vseed[k])
-    for k in range(N):
-        opti.set_initial(AR[k], np.clip((Vseed[k + 1] - Vseed[k]) / dt, -a_max, a_max))
+    if warm is not None:
+        # FULL warm-start (CONTINUATION): seed EVERY decision variable from a previously-converged
+        # trajectory (base/theta/arm/box + finite-difference velocities), so IPOPT starts at inf_pr~0
+        # and newly-added soft costs (w_place / w_level) only nudge the solution LOCALLY instead of
+        # perturbing the cold path to feasibility out of the good basin. base is seeded from the ACTUAL
+        # converged base (not box - r_off), which the seed route cannot supply.
+        def _rs(a):                                            # resample to N+1 knots (linear in index)
+            a = np.asarray(a, float)
+            if len(a) == N + 1:
+                return a
+            xs = np.linspace(0.0, 1.0, len(a))
+            return np.stack([np.interp(np.linspace(0, 1, N + 1), xs, a[:, j]) for j in range(a.shape[1])], 1)
+        # NOTE: do NOT name these `wb` etc. -- `wb` is the WholeBody object used by fk_arm below.
+        ws_b, ws_th, ws_a, ws_bx = (_rs(warm["base"]), _rs(warm["theta"]),
+                                    _rs(warm["arm"]), _rs(warm["box"]))
+        ws_q = np.concatenate([ws_b, ws_th, ws_a], axis=1)
+        ws_v = np.zeros((N + 1, 14))
+        ws_v[:-1, 0:3] = (ws_b[1:] - ws_b[:-1]) / dt
+        ws_v[:-1, 3:6] = (ws_th[1:] - ws_th[:-1]) / dt
+        ws_v[:-1, 6:14] = (ws_a[1:] - ws_a[:-1]) / dt
+        ws_v = np.clip(ws_v, -v_max, v_max)
+        for k in range(N + 1):
+            opti.set_initial(QR[k], ws_q[k])
+            opti.set_initial(PB[k], ws_bx[k])
+            opti.set_initial(VR[k], ws_v[k])
+        for k in range(N):
+            opti.set_initial(AR[k], np.clip((ws_v[k + 1] - ws_v[k]) / dt, -a_max, a_max))
+    else:
+        for k in range(N + 1):
+            opti.set_initial(QR[k], np.concatenate([base_ref[k], theta_seed[k], arm_seed_arr[k]]))
+            opti.set_initial(PB[k], box_guess[k])
+            opti.set_initial(VR[k], Vseed[k])
+        for k in range(N):
+            opti.set_initial(AR[k], np.clip((Vseed[k + 1] - Vseed[k]) / dt, -a_max, a_max))
 
+    # warm-started CONTINUATION runs start feasible and only locally adjust, but the soft place/level
+    # costs make IPOPT dither near the optimum (the dual never fully settles), so it can churn for
+    # thousands of iters past a perfectly good feasible point. Cap it and loosen the ACCEPTABLE test so
+    # it exits cleanly once feasible + near-optimal. Cold runs keep the strict defaults.
+    # adaptive mu (default) DITHERS near the optimum on the warm-started continuation: its second-order
+    # corrections overshoot (objective spikes) and never let the acceptable test trigger, so it churns
+    # to max_iter past a good feasible point. monotone mu from a warm start near the optimum descends
+    # smoothly and converges; cold runs keep adaptive (which needs it to reach feasibility from afar).
+    _warm = warm is not None
     opti.solver("ipopt", {"print_time": False},
-                {"max_iter": 5000, "tol": 1e-4, "acceptable_tol": 1e-3,
-                 "print_level": 5 if verbose else 0, "mu_strategy": "adaptive"})
+                {"max_iter": 400 if _warm else 5000, "tol": 1e-4,
+                 "acceptable_tol": 1e-2 if _warm else 1e-3, "acceptable_iter": 8 if _warm else 15,
+                 "print_level": 5 if verbose else 0,
+                 "mu_strategy": "monotone" if _warm else "adaptive"})
     try:
         sol = opti.solve()
         status = "solved"

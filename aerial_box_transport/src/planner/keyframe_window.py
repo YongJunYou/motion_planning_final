@@ -43,13 +43,28 @@ def main():
     # solution. W_KF (weight) and KF_SEED (warm-start file) are env-controlled so the ramp is scriptable.
     seed_path = os.environ.get("KF_SEED", "/tmp/window_kf_seed.npz")
     w_kf = float(os.environ.get("W_KF", "40"))
+    w_place = float(os.environ.get("W_PLACE", "300"))
+    w_level = float(os.environ.get("W_LEVEL", "200"))
     seed = np.load(seed_path)
-    print(f"[KEYFRAME-OCP] w_kf={w_kf}  seed={seed_path}")
+    # CONTINUATION: optionally warm-start the FULL trajectory from a previously-converged result
+    # (WARM_FROM). The place/level costs are too sensitive to add from the cold interp seed (the solver
+    # loses the good basin), so first solve plain (w_place=w_level=0) to make the converged reference,
+    # then re-solve WARM_FROM=that with the costs on -- IPOPT starts feasible and only nudges the place.
+    warm = None
+    warm_from = os.environ.get("WARM_FROM", "")
+    if warm_from and os.path.exists(warm_from):
+        w = np.load(warm_from)
+        warm = {"base": w["base"], "theta": w["theta"], "arm": w["arm"], "box": w["box"]}
+    print(f"[KEYFRAME-OCP] w_kf={w_kf}  w_place={w_place}  w_level={w_level}  seed={seed_path}  "
+          f"warm={warm_from or 'none'}")
 
     from planner.ocp import solve_ocp
     res = solve_ocp(window=True, window_mode="soft_box", verbose=True, transport_dur=TRANSPORT_DUR,
                     use_cylinders=False,   # CRITICAL: the pick/place vertical cylinders conflict with the
                     #                        window passage (hybrid_window passes this; we had defaulted True)
+                    # w_place + w_level: soft, rack-gated. Pull the box STRAIGHT DOWN onto the rack and
+                    # level the base (tilt+yaw->0) at the rack so the rigidly-gripped box lands upright.
+                    w_place=w_place, w_level=w_level, warm=warm,
                     seed={"q_route": seed["q_route"], "box_route": seed["box_route"]},
                     keyframe={"q14": kf_q14, "box_x": KF_BOX_X}, w_kf=w_kf)
 

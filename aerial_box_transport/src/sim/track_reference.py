@@ -89,13 +89,21 @@ ROBOT_CFG = ArticulationCfg(
         usd_path=USD,
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             articulation_enabled=True, fix_root_link=False, enabled_self_collisions=False,
-            solver_position_iteration_count=8, solver_velocity_iteration_count=0)),
+            # env-tunable solver iters for grip-fidelity sweeps (defaults = original behaviour). Raising
+            # them did NOT fix the box pivoting through the window pitch, so defaults are left unchanged.
+            solver_position_iteration_count=int(os.environ.get("GRIP_POSIT", "8")),
+            solver_velocity_iteration_count=int(os.environ.get("GRIP_VELIT", "0")))),
     init_state=ArticulationCfg.InitialStateCfg(pos=SPAWN, joint_pos={**TILT_HOME, **ARM_HOME}),
     actuators={
         "tilt": ImplicitActuatorCfg(joint_names_expr=["dof_[lr][bf][12]"],
                                     stiffness=100.0, damping=10.0, effort_limit_sim=20.0),
+        # arm/jaw PD, env-tunable for grip-clamp sweeps (defaults = original). NOTE: raising stiffness /
+        # effort did NOT hold the box orientation either, so defaults are left unchanged (do not want to
+        # perturb the desk->rack slip-aware demo). Grip-slip through the window pitch is still open.
         "arms": ImplicitActuatorCfg(joint_names_expr=["dof_[lr][1-4]"],
-                                    stiffness=6000.0, damping=400.0, effort_limit_sim=300.0),
+                                    stiffness=float(os.environ.get("GRIP_STIFF", "6000.0")),
+                                    damping=float(os.environ.get("GRIP_DAMP", "400.0")),
+                                    effort_limit_sim=float(os.environ.get("GRIP_EFFORT", "300.0"))),
     },
 )
 
@@ -254,10 +262,32 @@ def main():
     robot.write_root_velocity_to_sim(root[:, 7:])
     robot.write_joint_state_to_sim(q0, torch.zeros_like(q0))
     scene.reset()
+
+    # GRIP-FIDELITY sweep knob (opt-in via GRIP_MU env). The box is held only by friction; through the
+    # 53 deg window pitch it pivots/swings ~90 deg and is set down ~33 deg off-level. Raising box + pad
+    # friction was TESTED (mu up to 3.0) and did NOT change the swing -- the box pivots as a near-free
+    # pendulum, so the gap is contact ENGAGEMENT, not the friction coefficient. Left opt-in (no default
+    # override) until that is resolved, so the desk->rack slip-aware demo keeps its native friction.
+    def _set_friction(view, mu):
+        mats = view.get_material_properties().clone()
+        mats[..., 0] = mu      # static friction
+        mats[..., 1] = mu      # dynamic friction
+        mats[..., 2] = 0.0     # restitution
+        view.set_material_properties(mats, torch.arange(mats.shape[0], device=mats.device))
+        return tuple(mats.shape)
+
+    if "GRIP_MU" in os.environ:
+        mu = float(os.environ["GRIP_MU"])
+        try:
+            sb = _set_friction(box.root_physx_view, mu)
+            sr = _set_friction(robot.root_physx_view, mu)
+            print(f"[INFO] grip friction set to mu={mu} (box shapes {sb}, robot shapes {sr})")
+        except Exception as e:
+            print(f"[WARN] could not set friction via physx view: {e}")
     print(f"[INFO] mass={m_total:.3f} kg, arm ids={arm_ids}, ref horizon={ref.t[-1]:.1f}s")
 
     log = {"t": [], "p": [], "p_d": [], "tilt_deg": [], "arm_err": [],
-           "ee_mid": [], "box_set": []}
+           "ee_mid": [], "box_set": [], "box_tilt": []}
     t, count = 0.0, 0
     T = args_cli.max_time
 
@@ -342,6 +372,8 @@ def main():
             log["ee_mid"].append(actual_ee_mid().tolist())              # actual gripper midpoint
             log["box_set"].append((box.data.root_pos_w[0].cpu().numpy()
                                    + np.array([0.0, 0.0, BOX_BASE_TO_CENTER])).tolist())  # actual box
+            box_R = matrix_from_quat(box.data.root_quat_w[0].unsqueeze(0))[0].cpu().numpy()
+            log["box_tilt"].append(float(np.degrees(np.arccos(np.clip(box_R[2, 2], -1, 1)))))  # box bottom off-level
             if count % 200 == 0:
                 pe = p - p_d
                 print(f"[t={t:5.2f}] pos_err=({pe[0]:+.3f},{pe[1]:+.3f},{pe[2]:+.3f}) m "
@@ -358,13 +390,19 @@ def main():
         p_d = np.array(log["p_d"])
         np.savez(args_cli.out, t=np.array(log["t"]), p=p, p_d=p_d,
                  tilt_deg=np.array(log["tilt_deg"]), arm_err=np.array(log["arm_err"]),
-                 ee_mid=np.array(log["ee_mid"]), box_set=np.array(log["box_set"]))
+                 ee_mid=np.array(log["ee_mid"]), box_set=np.array(log["box_set"]),
+                 box_tilt=np.array(log["box_tilt"]))
         if len(p):
             settle = np.array(log["t"]) > 1.0   # ignore the initial settle
             rmse = np.sqrt(np.mean(np.sum((p[settle] - p_d[settle]) ** 2, axis=1)))
             print(f"[RESULT] position RMSE (after settle) = {rmse * 1e3:.1f} mm")
-            print(f"[RESULT] max tilt = {np.max(log['tilt_deg']):.2f} deg, "
+            print(f"[RESULT] max base tilt = {np.max(log['tilt_deg']):.2f} deg, "
                   f"final arm err = {log['arm_err'][-1]:.3f} rad")
+            tb = np.array(log["box_tilt"]); tt = np.array(log["t"])
+            rel = float(d_pb[2]) if (d_pb := np.load(args_cli.ref)["phase_bounds"]) is not None else 13.6
+            near_rel = tb[(tt >= rel - 0.4) & (tt <= rel + 0.2)]
+            print(f"[RESULT] BOX tilt-from-level: max {tb.max():.1f} deg, at release(~{rel:.1f}s) "
+                  f"{near_rel.mean() if len(near_rel) else float('nan'):.1f} deg, final {tb[-1]:.1f} deg")
             print(f"[RESULT] final base z = {p[-1, 2]:.3f} m (ref {p_d[-1, 2]:.3f} m)")
             print(f"[RESULT] wrote {args_cli.out}")
 
