@@ -132,7 +132,7 @@ All numbers recomputed from the canonical npz; the script + env for each table i
 criterion: IPOPT inf_pr < 1e-6 at exit OR return_status Solve_Succeeded / Solved_To_Acceptable_Level.
 
 ## Table I: convergence across initialization strategies
-N = 5 jittered random restarts per cold strategy (Gaussian sigma 0.05 m/rad added to the initial
+N = 10 jittered random restarts per cold strategy (Gaussian sigma 0.05 m/rad added to the initial
 guess; src/planner/table1_sweep.py, am_dualarm). Every row is the SAME window passage solve (window
 soft_box, use_cylinders=False, transport 9 s); only the initialization differs. naive/linear capped at
 400 iters, guided at 1500 (a converging solve reaches feasibility by ~620 iters, see sampler). "solve
@@ -141,18 +141,18 @@ placement-refinement continuation on top (a few hundred warm iters).
 
 | init strategy | converged? (success/N) | solve time (s) | collision-free? |
 |---|---|---|---|
-| naive init (no seed) | 0 / 5 | did not converge (Maximum_Iterations_Exceeded @ 400; inf_pr plateaus 1.3e-3 .. 1.1e+1) | n/a (no feasible solution) |
-| linear-interp seed (TrajOpt-style) | 0 / 5 | did not converge (Maximum_Iterations_Exceeded @ 400; inf_pr 7.8e-5 .. 7.5) | n/a (no feasible solution) |
+| naive init (no seed) | 0 / 10 | did not converge (Maximum_Iterations_Exceeded @ 400; inf_pr plateaus 3.6e-4 .. 2.1e+1) | n/a (no feasible solution) |
+| linear-interp seed (TrajOpt-style) | 0 / 10 | did not converge (Maximum_Iterations_Exceeded @ 400; inf_pr 7.8e-5 .. 8.3e+0) | n/a (no feasible solution) |
 | sampling-seeded (sampler_g2) | yes (1/1) | 479 (623 it, Solved_To_Acceptable_Level) | marginal: -2.7 cm, 2/149 knots |
 | keyframe-guided / ours (keyframe_g2) | yes (1/1) | ~1700 (reaches inf_pr 6.4e-7, runs to 1500-it cap on dual dithering) | yes: +2.8 cm, 0/149 knots |
-| OMPL CBiRRT+shortcut+retiming (geometric ref, dyn N/A) | always returns path | ~22 (median of 5; 4127 nodes, CPU-contended upper bound) | yes (kinematic) |
+| OMPL CBiRRT+shortcut+retiming (geometric ref, dyn N/A) | always returns path | ~20 (median 20.4 s of 5; 4127 nodes, deterministic) | yes (kinematic) |
 
 Notes:
 - naive / linear FAIL: their primal infeasibility plateaus 3 to 7 orders above the 1e-6 criterion and
   stops descending (IPOPT enters restoration), the signature of a trapped/infeasible local minimum,
   whereas the guided runs descend steadily to feasibility. A higher iter cap does not rescue them
   (this is also why a fair budget was not run to convergence: a single naive restart in restoration
-  took 50 min for 400 iters). 0/5 understates the contrast; the spec range was N=10-20.
+  took 50 min for 400 iters). All 10 restarts of each cold strategy failed.
 - The cold passage solves are themselves collision-free (sampler +0.6 cm / 0 pen, keyframe +6.8 cm /
   0 pen). The placement-refinement continuation that produces the g2 references tightens the sampler's
   yaw-squeeze passage into a -2.7 cm graze (2 knots) while the keyframe pitch passage stays clear
