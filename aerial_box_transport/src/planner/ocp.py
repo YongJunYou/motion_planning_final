@@ -87,7 +87,7 @@ def _symmetrize_arm(A):
 
 def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transport_dur=None,
               window_mode="soft", keyframe=None, w_kf=300.0, w_place=0.0, w_level=0.0,
-              w_padlevel=0.0, warm=None):
+              w_padlevel=0.0, w_rise=0.0, warm=None):
     # window_mode: "soft" = point-sample body + soft penalty (the working baseline);
     #              "soft_box" = base+box as ANALYTIC oriented boxes (exact, no sampling), soft penalty;
     #              "hard_box" = same analytic body, but opening-containment is a HARD constraint (convex
@@ -525,6 +525,11 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
     # CBiRRT seed has excess, run-dependent tilt (e.g. 84 deg early in transport), so let w_tilt
     # minimize the tilt freely while the window penalty still forces the tilt needed at the gap.
     w_trk, w_trk_th, w_trk_a = 80.0, 0.0, 20.0
+    import os as _osw
+    level_x0 = float(_osw.environ.get("W_LEVEL_X0", "-1.35"))  # box_x below which w_level levels the base
+    #   (tilt+yaw -> 0). Default -1.35 (just past the wall). Push it MORE negative (e.g. -2.0) to DECOUPLE
+    #   the window passage from the placement leveling, so each method keeps its NATIVE window homotopy
+    #   (e.g. the sampler's yaw-sideways squeeze) instead of being pulled to a low-yaw pitch passage.
     kf_q = ca.DM(keyframe["q14"]) if keyframe is not None else None   # keyframe-guided
     kf_bx = float(keyframe["box_x"]) if keyframe is not None else None
     if keyframe is not None:
@@ -638,9 +643,18 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
         # the side of x_mid = -1.0 which coincides with the window -- so neither touches the tilted
         # window passage. Without them the box swings in from the side, tilted and yawed, and tips
         # when the terminal pin (PB[N]==place) snaps it to the shelf.
-        if (w_place > 0.0 or w_level > 0.0 or w_padlevel > 0.0) and ph in ("transport", "release"):
+        if (w_place > 0.0 or w_level > 0.0 or w_padlevel > 0.0 or w_rise > 0.0) and ph in ("transport", "release"):
             g_rack = 0.5 * (ca.tanh((PB[k][0] - (place[0] - 0.5)) / 0.12)
                             - ca.tanh((PB[k][0] - (place[0] + 0.5)) / 0.12))   # ~1 over the rack x
+            if w_rise > 0.0:                        # UP-AND-OVER: while approaching/over the rack but NOT
+                # yet in the narrow descent column, keep the box ABOVE z_top_place so it rises over the
+                # rack and drops straight down the column (vs the sampler's low diagonal that grazes the
+                # shelf). keyframe already does this via its seed; this forces the sampler to as well.
+                g_rise = 0.5 * (ca.tanh((PB[k][0] - (place[0] - 0.5)) / 0.12)
+                                - ca.tanh((PB[k][0] - (place[0] + 1.0)) / 0.12))   # box_x in ~[-4.5,-3.0]
+                d2c = (PB[k][0] - place[0]) ** 2 + (PB[k][1] - place[1]) ** 2
+                in_col = 0.5 * (1.0 - ca.tanh((d2c - 0.04) / 0.02))   # ~1 within ~0.2 m of place (column)
+                cost += w_rise * g_rise * (1.0 - in_col) * ca.fmax(0.0, z_top_place - PB[k][2]) ** 2
             if w_padlevel > 0.0 and win:           # LEVEL THE PADS (hence the rigidly-gripped box) at the
                 # rack: box orientation = EE orientation, and the arm reaching down pitches the pads ~65
                 # deg even with the base level. Penalize the EE-frame y-axis horizontal components (it is
@@ -661,7 +675,7 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
                 # tuck the forward-reaching grip (mid_arm ~0.43 m forward) under the CoM, which plain
                 # w_tilt (40) does not outvote -- so without this the base coasts tilted to the rack
                 # and the box comes down on an edge. (yaw is otherwise unpenalized: w_yaw = 0.)
-                g_post = 0.5 * (1.0 - ca.tanh((PB[k][0] + 1.35) / 0.15))   # ~1 once past the wall (x<-1.35)
+                g_post = 0.5 * (1.0 - ca.tanh((PB[k][0] - level_x0) / 0.15))   # ~1 once box_x < level_x0
                 cost += w_level * g_post * ca.sumsqr(QR[k][3:6])
 
         if ph == "approach":
@@ -796,8 +810,12 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
     # to max_iter past a good feasible point. monotone mu from a warm start near the optimum descends
     # smoothly and converges; cold runs keep adaptive (which needs it to reach feasibility from afar).
     _warm = warm is not None
+    import os as _os2
+    _warm_maxit = int(_os2.environ.get("WARM_MAXIT", "400"))   # monotone mu converges steadily (no
+    #   dithering), so raise this when a warm run is still descending at the cap (e.g. a different
+    #   homotopy that the warm-start is far from); 400 suffices for a local nudge.
     opti.solver("ipopt", {"print_time": False},
-                {"max_iter": 400 if _warm else 5000, "tol": 1e-4,
+                {"max_iter": _warm_maxit if _warm else 5000, "tol": 1e-4,
                  "acceptable_tol": 1e-2 if _warm else 1e-3, "acceptable_iter": 8 if _warm else 15,
                  "print_level": 5 if verbose else 0,
                  "mu_strategy": "monotone" if _warm else "adaptive"})

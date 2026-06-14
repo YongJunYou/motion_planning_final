@@ -49,9 +49,26 @@ def solve():
     from planner.ocp import solve_ocp
     mode = os.environ.get("WINDOW_MODE", "soft")
     d = np.load(SEED)
+    # EQUALIZED-comparison knobs (defaults 0 / none = original plain hybrid). Set these to the SAME
+    # values the keyframe method uses (W_PLACE/W_LEVEL/W_PADLEVEL + a WARM_FROM continuation + soft_box)
+    # so the ONLY difference vs the keyframe run is the SEED SOURCE (sampler route vs keyframe interp).
+    w_place = float(os.environ.get("W_PLACE", "0"))
+    w_level = float(os.environ.get("W_LEVEL", "0"))
+    w_padlevel = float(os.environ.get("W_PADLEVEL", "0"))
+    w_rise = float(os.environ.get("W_RISE", "0"))
+    warm = None
+    warm_from = os.environ.get("WARM_FROM", "")
+    if warm_from and os.path.exists(warm_from):
+        w = np.load(warm_from)
+        warm = {"base": w["base"], "theta": w["theta"], "arm": w["arm"], "box": w["box"]}
+    print(f"[WINDOW-OCP] mode={mode}  w_place={w_place} w_level={w_level} w_padlevel={w_padlevel}  "
+          f"warm={warm_from or 'none'}")
     res = solve_ocp(window=True, use_cylinders=False, verbose=True, transport_dur=TRANSPORT_DUR,
-                    window_mode=mode, seed={"q_route": d["q_route"], "box_route": d["box_route"]})
-    out = _ref_path()
+                    window_mode=mode, w_place=w_place, w_level=w_level, w_padlevel=w_padlevel,
+                    w_rise=w_rise, warm=warm,
+                    seed={"q_route": d["q_route"], "box_route": d["box_route"]})
+    _rdir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "results"))
+    out = os.path.join(_rdir, os.environ["HW_OUT"]) if os.environ.get("HW_OUT") else _ref_path()
     np.savez(out, times=res["times"], base=res["base"], arm=res["arm"], box=res["box"],
              theta=res["theta"], phase_bounds=res["phase_bounds"], lam=res["lam"],
              fn_set=res["fn_set"], box_ref_z=res["box_ref_z"], box_ref=res["box_ref"],

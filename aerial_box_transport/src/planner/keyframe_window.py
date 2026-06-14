@@ -47,6 +47,7 @@ def main():
     w_level = float(os.environ.get("W_LEVEL", "200"))
     w_padlevel = float(os.environ.get("W_PADLEVEL", "400"))   # level the EE pads at the rack so the
     #                          rigidly-gripped box is set down on its bottom face (box orient = EE orient)
+    w_rise = float(os.environ.get("W_RISE", "800"))           # up-and-over the rack before descending
     seed = np.load(seed_path)
     # CONTINUATION: optionally warm-start the FULL trajectory from a previously-converged result
     # (WARM_FROM). The place/level costs are too sensitive to add from the cold interp seed (the solver
@@ -66,11 +67,11 @@ def main():
                     #                        window passage (hybrid_window passes this; we had defaulted True)
                     # w_place + w_level: soft, rack-gated. Pull the box STRAIGHT DOWN onto the rack and
                     # level the base (tilt+yaw->0) at the rack so the rigidly-gripped box lands upright.
-                    w_place=w_place, w_level=w_level, w_padlevel=w_padlevel, warm=warm,
+                    w_place=w_place, w_level=w_level, w_padlevel=w_padlevel, w_rise=w_rise, warm=warm,
                     seed={"q_route": seed["q_route"], "box_route": seed["box_route"]},
                     keyframe={"q14": kf_q14, "box_x": KF_BOX_X}, w_kf=w_kf)
 
-    out = os.path.join(RDIR, "window_reference_keyframe.npz")
+    out = os.path.join(RDIR, os.environ.get("KF_OUT", "window_reference_keyframe.npz"))
     np.savez(out, times=res["times"], base=res["base"], arm=res["arm"], box=res["box"],
              theta=res["theta"], phase_bounds=res["phase_bounds"], lam=res["lam"],
              fn_set=res["fn_set"], box_ref_z=res["box_ref_z"], box_ref=res["box_ref"],
