@@ -86,7 +86,8 @@ def _symmetrize_arm(A):
 
 
 def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transport_dur=None,
-              window_mode="soft", keyframe=None, w_kf=300.0, w_place=0.0, w_level=0.0, warm=None):
+              window_mode="soft", keyframe=None, w_kf=300.0, w_place=0.0, w_level=0.0,
+              w_padlevel=0.0, warm=None):
     # window_mode: "soft" = point-sample body + soft penalty (the working baseline);
     #              "soft_box" = base+box as ANALYTIC oriented boxes (exact, no sampling), soft penalty;
     #              "hard_box" = same analytic body, but opening-containment is a HARD constraint (convex
@@ -287,6 +288,12 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
                  "r_link1_01", "r_link2_01", "r_link3_01", "r_link4_01", "ee_l", "ee_r"]
         _fexpr = [wb.cdata.oMf[wb.model.getFrameId(n)].translation for n in _coll]
         fk_body = ca.Function("fk_body", [qsym], _fexpr, ["q"], _coll)
+        # pad (end-effector) ROTATIONS in WORLD, for leveling the grip at the place: the carried box's
+        # orientation = the EE pad orientation (not the base), so leveling the base is not enough -- the
+        # arm reaching down pitches the pads. At the level grip the EE-frame y-axis is vertical, so we
+        # penalize its horizontal components to keep the pads (hence the box) flat for set-down.
+        _Rexpr = [wb.cdata.oMf[wb.model.getFrameId(n)].rotation for n in ("ee_l", "ee_r")]
+        fk_padR = ca.Function("fk_padR", [qsym], _Rexpr, ["q"], ["RL", "RR"])
         _idx = {n: i for i, n in enumerate(_coll)}
         _chains = [["l_link1_01", "l_link2_01", "l_link3_01", "l_link4_01", "ee_l"],
                    ["r_link1_01", "r_link2_01", "r_link3_01", "r_link4_01", "ee_r"]]
@@ -631,9 +638,17 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
         # the side of x_mid = -1.0 which coincides with the window -- so neither touches the tilted
         # window passage. Without them the box swings in from the side, tilted and yawed, and tips
         # when the terminal pin (PB[N]==place) snaps it to the shelf.
-        if (w_place > 0.0 or w_level > 0.0) and ph in ("transport", "release"):
+        if (w_place > 0.0 or w_level > 0.0 or w_padlevel > 0.0) and ph in ("transport", "release"):
             g_rack = 0.5 * (ca.tanh((PB[k][0] - (place[0] - 0.5)) / 0.12)
                             - ca.tanh((PB[k][0] - (place[0] + 0.5)) / 0.12))   # ~1 over the rack x
+            if w_padlevel > 0.0 and win:           # LEVEL THE PADS (hence the rigidly-gripped box) at the
+                # rack: box orientation = EE orientation, and the arm reaching down pitches the pads ~65
+                # deg even with the base level. Penalize the EE-frame y-axis horizontal components (it is
+                # vertical at the level grip); the wrist + base reconfigure to lower the box FLAT.
+                _Rp = fk_padR(q_full(QR[k]))
+                _RL, _RR = _Rp[0], _Rp[1]
+                cost += w_padlevel * g_rack * (_RL[0, 1] ** 2 + _RL[1, 1] ** 2
+                                               + _RR[0, 1] ** 2 + _RR[1, 1] ** 2)
             if w_place > 0.0:                       # pull the box DOWN a vertical column over `place`:
                 g_low = 0.5 * (1.0 - ca.tanh((PB[k][2] - z_top_place) / 0.06))  # ~1 below z_top_place
                 cost += w_place * g_rack * g_low * ((PB[k][0] - place[0]) ** 2

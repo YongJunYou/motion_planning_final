@@ -45,6 +45,8 @@ def main():
     w_kf = float(os.environ.get("W_KF", "40"))
     w_place = float(os.environ.get("W_PLACE", "300"))
     w_level = float(os.environ.get("W_LEVEL", "200"))
+    w_padlevel = float(os.environ.get("W_PADLEVEL", "400"))   # level the EE pads at the rack so the
+    #                          rigidly-gripped box is set down on its bottom face (box orient = EE orient)
     seed = np.load(seed_path)
     # CONTINUATION: optionally warm-start the FULL trajectory from a previously-converged result
     # (WARM_FROM). The place/level costs are too sensitive to add from the cold interp seed (the solver
@@ -55,8 +57,8 @@ def main():
     if warm_from and os.path.exists(warm_from):
         w = np.load(warm_from)
         warm = {"base": w["base"], "theta": w["theta"], "arm": w["arm"], "box": w["box"]}
-    print(f"[KEYFRAME-OCP] w_kf={w_kf}  w_place={w_place}  w_level={w_level}  seed={seed_path}  "
-          f"warm={warm_from or 'none'}")
+    print(f"[KEYFRAME-OCP] w_kf={w_kf}  w_place={w_place}  w_level={w_level}  w_padlevel={w_padlevel}  "
+          f"seed={seed_path}  warm={warm_from or 'none'}")
 
     from planner.ocp import solve_ocp
     res = solve_ocp(window=True, window_mode="soft_box", verbose=True, transport_dur=TRANSPORT_DUR,
@@ -64,7 +66,7 @@ def main():
                     #                        window passage (hybrid_window passes this; we had defaulted True)
                     # w_place + w_level: soft, rack-gated. Pull the box STRAIGHT DOWN onto the rack and
                     # level the base (tilt+yaw->0) at the rack so the rigidly-gripped box lands upright.
-                    w_place=w_place, w_level=w_level, warm=warm,
+                    w_place=w_place, w_level=w_level, w_padlevel=w_padlevel, warm=warm,
                     seed={"q_route": seed["q_route"], "box_route": seed["box_route"]},
                     keyframe={"q14": kf_q14, "box_x": KF_BOX_X}, w_kf=w_kf)
 
