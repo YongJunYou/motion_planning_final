@@ -852,8 +852,11 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
     iter_count = int(_st.get("iter_count", 0) or 0)
     inf_pr = float("nan")
     _its = _st.get("iterations", None)
+    inf_pr_hist, obj_hist = [], []
     if isinstance(_its, dict) and _its.get("inf_pr"):
         inf_pr = float(_its["inf_pr"][-1])
+        inf_pr_hist = [float(x) for x in _its["inf_pr"]]
+        obj_hist = [float(x) for x in _its.get("obj", [])]
     converged = (return_status in ("Solve_Succeeded", "Solved_To_Acceptable_Level")) or (inf_pr < 1e-6)
 
     val = sol.value
@@ -891,6 +894,7 @@ def solve_ocp(verbose=False, seed=None, use_cylinders=True, window=False, transp
         "max_tilt_deg": float(np.degrees(np.max(np.linalg.norm(theta, axis=1)))),
         "solve_time": float(solve_time), "iter_count": iter_count,
         "return_status": return_status, "inf_pr": inf_pr, "converged": bool(converged),
+        "inf_pr_hist": inf_pr_hist, "obj_hist": obj_hist,
     }
 
 
