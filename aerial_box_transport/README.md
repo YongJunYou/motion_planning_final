@@ -49,21 +49,25 @@
   **창문 통과 연구**: 창문 keep-out을 추가한 OCP(`ocp.py`의 `solve_ocp(window=True)`),
   창문 충돌을 coal(GJK/EPA)로 보는 샘플러(`sampling_compare.py`), 윈도우 CBiRRT 테스트
   (`window_test.py`), 샘플->OCP 윈도우 하이브리드(`hybrid_window.py`).
-  **키프레임 가이드**(메인 연구): 제약 일관 보간 seed 생성(`build_kf_seed.py`), 키프레임
-  유도 OCP(`keyframe_window.py`), 세 레퍼런스의 coal 정량 검증(`verify_window.py`).
+  **키프레임 가이드**(메인 연구): 제약 일관 보간 seed 생성(`build_kf_seed.py`, `KF_PITCH`/
+  `SEED_MODE` 환경변수), 키프레임 유도 OCP(`keyframe_window.py`), 두 g2 레퍼런스의 coal 정량
+  검증(`verify_window.py`); 분석/sweep: 경로길이(`path_lengths.py`), 교차 rpy 그림
+  (`fig_crossing_rpy.py`/`crossing_rpy.py`), 수렴 sweep(`table1_sweep.py`), 키프레임 pitch
+  sweep(`table3_sweep.py`) -> 논문 표(`docs/paper_tables_TODO.md`).
   시각화/문서: 재생 파일 변환(`export_play.py`), 한국어 방법론 PDF(`make_window_method_pdf.py`),
   안정 동작 버전 백업(`ocp_soft_working.py`)
 - `src/sim/`       gRITE SE(3) 컨트롤러(`grite_controller.py`), IsaacSim 동역학 재생/검증
-  (`track_reference.py`, 동적 박스 + 실제 창 충돌체), 계획 경로의 기구학적 재생
-  (`play_path.py`, 계획 자세를 그대로 포즈; `--proxy`로 창문 keep-out 볼륨 표시)
+  (`track_reference.py`, 동적 박스 + 실제 창 충돌체; `--record`로 mp4 저장, `CAM_EYE`/`CAM_TARGET`
+  로 카메라 지정), 계획 경로의 기구학적 재생(`play_path.py`, `--proxy`로 창문 keep-out 볼륨 표시).
+  두 레퍼런스를 한 env에서 번갈아 재생: 기구학적 `play_alternate.py`, 물리(gRITE) `track_alternate.py`
 - `src/baselines/`, `src/experiments/`  고정력 베이스라인, 가속도 스윕/헤드라인 플롯
 - `tests/`         플래너 단위테스트(pytest)
 - `docs/`          `OCP_formulation.pdf`(비용 함수 + 제약조건, 한국어),
   `window_method_ko.pdf`(창문 통과 방법론, 한국어), `window_keyframe_results.md`
-  (키프레임 가이드 3종 비교 결과 + 재현 명령)
+  (키프레임 가이드 2종(g2) 비교 결과 + 재현 명령), `paper_tables_TODO.md`(논문 결과 표 I/II/III)
 - `results/`       생성 산출물(궤적 npz, 그림). git에는 포함되지 않음(재생성 가능).
-  창문 레퍼런스: `window_reference_soft_box.npz`(샘플러 가이드), `window_reference_wedge_only.npz`
-  (wedge 제약), `window_reference_keyframe.npz`(키프레임 가이드)
+  창문 레퍼런스(canonical): `window_reference_sampler_g2.npz`(샘플러 가이드),
+  `window_reference_keyframe_g2.npz`(키프레임 가이드)
 
 ## 환경 (conda 3개)
 환경 자체(설치된 패키지 폴더)는 git에 올리지 않습니다(수 GB, 플랫폼 의존 바이너리).
@@ -191,21 +195,25 @@ sash 아래로 내려가 더 낮은 개구부를 통과하도록 자연스럽게
 
 **결과**(`verify_window.py`, am_sampling, coal 부호 거리로 세 레퍼런스를 동일 방식 검증):
 
-| 지표 (149 knots) | soft_box(샘플러) | wedge_only | **keyframe** |
-|---|---|---|---|
-| base 최소 여유 | -3.8 cm | -0.9 cm | **+2.8 cm** |
-| arm 최소 여유 | +0.2 cm | +3.3 cm | **+5.7 cm** |
-| box 최소 여유 | +2.6 cm | +3.8 cm | **+4.1 cm** |
-| 창 관통 knot | 2 / 149 | 2 / 149 | **0 / 149** |
-| 최대 자세(rotvec norm) | 86.7° | 96.8° | **53.2°** |
+| 지표 (149 knots) | sampler_g2(샘플러) | **keyframe_g2 (ours)** |
+|---|---|---|
+| base 최소 여유 | -2.7 cm (긁힘) | **+2.8 cm (무충돌)** |
+| arm 최소 여유 | +4.3 cm | **+4.8 cm** |
+| box 최소 여유 | +9.1 cm | +7.5 cm |
+| 창 관통 knot | 2 / 149 | **0 / 149** |
+| 최대 자세(rotvec norm) | 84.1° | **53.0°** |
+| base 회전 경로길이 | 327.8° | **251.2°** |
+| base 병진 경로길이 | 11.54 m | **10.13 m** |
 
-핵심: 가이드 없는 해는 큰 자세가 대부분 **yaw**입니다. base를 옆으로 85~90° 돌려 몸의 긴
-축을 모로 세워 비집고(yaw -81~-90°, pitch만 +16~+24°) 통과하지만 창틀을 긁습니다(관통 2회).
-사람 키프레임 하나(pitch 60°, yaw 없음)는 **pitch +1~+47.5°**의 정면 대각선 통과로 유도해,
-기울어진 차양에 몸을 기울여 들어갑니다. 결과는 **유일한 무충돌 궤적(0/149)**, 모든 부위
-최고 여유, 그리고 훨씬 온건한 자세(53° vs 87~97°)입니다. 즉 키프레임은 기존 경로를 미세
-조정한 게 아니라, 질적으로 다르고 더 나은 homotopy class를 선택합니다. 자세한 표와 해석은
-`docs/window_keyframe_results.md`를 보세요.
+핵심: 샘플러 해는 큰 자세가 대부분 **yaw**입니다. base를 옆으로 70~80° 돌려 몸의 긴 축을
+모로 세워 비집고(yaw -68~-80°, pitch만 +12~+19°) 통과하지만 창틀을 긁습니다(관통 2회, base
+-2.7 cm). 사람 키프레임 하나(pitch 60°, yaw 없음)는 **pitch +3~+50°**의 정면 대각선 통과로
+유도해, 기울어진 차양에 몸을 기울여 들어갑니다. 결과는 **유일한 무충돌 궤적(0/149)**, base/arm
+최고 여유, 훨씬 온건한 자세(53° vs 84°), 더 짧은 회전 경로(251 vs 328°)입니다. 즉 키프레임은
+기존 경로를 미세 조정한 게 아니라, 질적으로 다르고 더 나은 homotopy class를 선택합니다. 또한
+naive/linear-interp 초기화는 이 비볼록 narrow-gap 문제에서 수렴하지 못하지만(0/10) 샘플러·
+키프레임 seed는 무충돌 통과로 수렴합니다. 자세한 표/그림과 수렴 연구는
+`docs/window_keyframe_results.md`와 `docs/paper_tables_TODO.md`(논문 표 I/II/III)를 보세요.
 
 실행 예:
 ```
@@ -213,17 +221,17 @@ sash 아래로 내려가 더 낮은 개구부를 통과하도록 자연스럽게
 conda run -n am_sampling python src/planner/build_kf_seed.py
 # 2) 키프레임 가이드 OCP (am_dualarm) -> results/window_reference_keyframe.npz
 W_KF=40 W_TRK_TH=0 conda run -n am_dualarm python src/planner/keyframe_window.py
-# 3) 세 레퍼런스 coal 정량 비교 (am_sampling)
+# 3) 두 g2 레퍼런스 coal 정량 비교 + 경로길이 + 교차 rpy 그림 (am_sampling)
 conda run -n am_sampling python src/planner/verify_window.py
-# 4a) 계획 경로 기구학적 재생 (am_isaac, 창문 keep-out 볼륨 표시)
-conda run -n am_sampling python src/planner/export_play.py /tmp/window_kf_path.npy \
-    /tmp/window_kf_play.npz --box results/window_reference_keyframe.npz
-conda run -n am_isaac python src/sim/play_path.py --play /tmp/window_kf_play.npz --proxy --loop
-# 4b) gRITE 동역학 추종 (am_isaac, 동적 박스 + 실제 창 충돌체)
-conda run -n am_isaac python src/sim/track_reference.py \
-    --ref results/window_reference_keyframe.npz --loop --max_time 15
+conda run -n am_sampling python src/planner/path_lengths.py
+conda run -n am_sampling python src/planner/fig_crossing_rpy.py
+# 4) 한 env에서 두 통과 경로를 번갈아 재생 (am_isaac)
+#   기구학적(계획 그대로): play_alternate.py / 물리(gRITE 추종, 마찰 파지): track_alternate.py
+conda run -n am_isaac python src/sim/play_alternate.py \
+    --playA /tmp/play_sampler_g2.npz --playB /tmp/play_keyframe_g2.npz --proxy
+conda run -n am_isaac python src/sim/track_alternate.py \
+    --refA results/window_reference_sampler_g2.npz --refB results/window_reference_keyframe_g2.npz
 ```
 
-gRITE 동역학 추종 결과: 창 통과 순간(최대 pitch 53.5°) base 위치 오차 약 1.9 cm, arm
-오차 0.04~0.07 rad로 그립을 유지한 채 통과합니다. 즉 키프레임 경로는 기하적 무충돌일 뿐
-아니라 실제 컨트롤러로 동역학적으로도 추종 가능합니다.
+gRITE 동역학 추종 결과: 창 통과 순간 base 위치 오차 약 1.4 cm로 그립을 유지한 채 통과합니다.
+즉 키프레임 경로는 기하적 무충돌일 뿐 아니라 실제 컨트롤러로 동역학적으로도 추종 가능합니다.
